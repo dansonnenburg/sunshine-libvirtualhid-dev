@@ -17,42 +17,54 @@ set(WIX_BUILD_DIRECTORY "${CPACK_PACKAGE_DIRECTORY}/_CPack_Packages/win64/WIX")
 
 # Download and install WiX tools locally in the build directory
 set(WIX_TOOL_PATH "${CMAKE_BINARY_DIR}/.wix")
+set(WIX_EXECUTABLE "${WIX_TOOL_PATH}/wix")
 file(MAKE_DIRECTORY ${WIX_TOOL_PATH})
 
-# Install WiX locally using dotnet
-execute_process(
-        COMMAND ${DOTNET_EXECUTABLE} tool install --tool-path ${WIX_TOOL_PATH} wix --version ${WIX_VERSION}
-        ERROR_VARIABLE WIX_INSTALL_OUTPUT
-        RESULT_VARIABLE WIX_INSTALL_RESULT
-)
+if(WIN32)
+    set(WIX_EXECUTABLE "${WIX_TOOL_PATH}/wix.exe")
+endif()
 
-if(NOT WIX_INSTALL_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to install WiX tools locally.
-     WiX packaging may not work correctly, error: ${WIX_INSTALL_OUTPUT}")
+# Install WiX locally using dotnet. Reuse an existing local tool so repeated
+# CMake configures do not fail when dotnet refuses to install over it.
+if(NOT EXISTS "${WIX_EXECUTABLE}")
+    execute_process(
+            COMMAND ${DOTNET_EXECUTABLE} tool install --tool-path ${WIX_TOOL_PATH} wix --version ${WIX_VERSION}
+            ERROR_VARIABLE WIX_INSTALL_OUTPUT
+            RESULT_VARIABLE WIX_INSTALL_RESULT
+    )
+
+    if(NOT WIX_INSTALL_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to install WiX tools locally.
+         WiX packaging may not work correctly, error: ${WIX_INSTALL_OUTPUT}")
+    endif()
 endif()
 
 # Install WiX UI Extension
-execute_process(
-        COMMAND "${WIX_TOOL_PATH}/wix" extension add WixToolset.UI.wixext/${WIX_UI_VERSION}
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        ERROR_VARIABLE WIX_UI_INSTALL_OUTPUT
-        RESULT_VARIABLE WIX_UI_INSTALL_RESULT
-)
+if(NOT EXISTS "${WIX_TOOL_PATH}/extensions/WixToolset.UI.wixext/${WIX_UI_VERSION}")
+    execute_process(
+            COMMAND "${WIX_EXECUTABLE}" extension add WixToolset.UI.wixext/${WIX_UI_VERSION}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            ERROR_VARIABLE WIX_UI_INSTALL_OUTPUT
+            RESULT_VARIABLE WIX_UI_INSTALL_RESULT
+    )
 
-if(NOT WIX_UI_INSTALL_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to install WiX UI extension, error: ${WIX_UI_INSTALL_OUTPUT}")
+    if(NOT WIX_UI_INSTALL_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to install WiX UI extension, error: ${WIX_UI_INSTALL_OUTPUT}")
+    endif()
 endif()
 
 # Install WiX Util Extension
-execute_process(
-        COMMAND "${WIX_TOOL_PATH}/wix" extension add WixToolset.Util.wixext/${WIX_UI_VERSION}
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        ERROR_VARIABLE WIX_UTIL_INSTALL_OUTPUT
-        RESULT_VARIABLE WIX_UTIL_INSTALL_RESULT
-)
+if(NOT EXISTS "${WIX_TOOL_PATH}/extensions/WixToolset.Util.wixext/${WIX_UI_VERSION}")
+    execute_process(
+            COMMAND "${WIX_EXECUTABLE}" extension add WixToolset.Util.wixext/${WIX_UI_VERSION}
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            ERROR_VARIABLE WIX_UTIL_INSTALL_OUTPUT
+            RESULT_VARIABLE WIX_UTIL_INSTALL_RESULT
+    )
 
-if(NOT WIX_UTIL_INSTALL_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to install WiX Util extension, error: ${WIX_UTIL_INSTALL_OUTPUT}")
+    if(NOT WIX_UTIL_INSTALL_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to install WiX Util extension, error: ${WIX_UTIL_INSTALL_OUTPUT}")
+    endif()
 endif()
 
 # Set WiX-specific variables
