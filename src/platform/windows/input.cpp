@@ -15,8 +15,14 @@
 
 // platform includes
 #include <Windows.h>
+#include <SetupAPI.h>
+#include <hidsdi.h>
 
 // standard includes
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -522,6 +528,213 @@ namespace platf {
   struct input_raw_t {
     virtualhid::input_context_t virtualhid;  ///< libvirtualhid input context.
     std::unique_ptr<vigem_t> vigem;  ///< ViGEm fallback context.
+    std::unique_ptr<class libvirtualhid_dev_t> libvirtualhid_dev;  ///< Experimental static HID gamepad backend.
+  };
+
+#pragma pack(push, 1)
+  struct libvirtualhid_dev_report_t {
+    std::uint8_t report_id;
+    std::uint16_t buttons;
+    std::uint8_t left_stick_x;
+    std::uint8_t left_stick_y;
+    std::uint8_t right_stick_x;
+    std::uint8_t right_stick_y;
+    std::uint8_t left_trigger;
+    std::uint8_t right_trigger;
+  };
+#pragma pack(pop)
+
+  class libvirtualhid_dev_t {
+  public:
+    int init() {
+      device_.reset(open_device());
+      if (!device_) {
+        BOOST_LOG(warning) << "libvirtualhid-dev driver is not installed or could not be opened"sv;
+        return -1;
+      }
+
+      BOOST_LOG(info) << "Connected to experimental libvirtualhid-dev gamepad driver"sv;
+      return 0;
+    }
+
+    int alloc_gamepad(const gamepad_id_t &id) {
+      if (!device_ || id.globalIndex != 0) {
+        BOOST_LOG(warning) << "libvirtualhid-dev supports exactly one gamepad slot"sv;
+        return -1;
+      }
+
+      allocated_ = true;
+      return submit(neutral_report());
+    }
+
+    int rebind_gamepad(const gamepad_id_t &id) const {
+      return allocated_ && id.globalIndex == 0 ? 0 : -1;
+    }
+
+    bool has_gamepad(int nr) const {
+      return allocated_ && nr == 0;
+    }
+
+    void free_gamepad(int nr) {
+      if (nr != 0) {
+        return;
+      }
+
+      static_cast<void>(submit(neutral_report()));
+      allocated_ = false;
+    }
+
+    void update(const gamepad_state_t &state) {
+      if (allocated_) {
+        static_cast<void>(submit(report_from(state)));
+      }
+    }
+
+  private:
+    struct close_handle_t {
+      void operator()(HANDLE handle) const {
+        if (handle && handle != INVALID_HANDLE_VALUE) {
+          CloseHandle(handle);
+        }
+      }
+    };
+
+    using unique_handle_t = std::unique_ptr<void, close_handle_t>;
+
+    struct destroy_device_info_list_t {
+      void operator()(HDEVINFO info) const {
+        if (info && info != INVALID_HANDLE_VALUE) {
+          SetupDiDestroyDeviceInfoList(info);
+        }
+      }
+    };
+
+    using unique_device_info_t = std::unique_ptr<void, destroy_device_info_list_t>;
+
+    static libvirtualhid_dev_report_t neutral_report() {
+      return {1, 0, 128, 128, 128, 128, 0, 0};
+    }
+
+    static std::uint8_t axis(std::int16_t value) {
+      const auto shifted = static_cast<std::int32_t>(value) + 32768;
+      return static_cast<std::uint8_t>((shifted * 255) / 65535);
+    }
+
+    static libvirtualhid_dev_report_t report_from(const gamepad_state_t &state) {
+      std::uint16_t buttons = 0;
+      const auto flags = state.buttonFlags;
+      auto set = [&buttons](std::uint32_t flag, std::uint16_t bit) {
+        if (flag) {
+          buttons |= bit;
+        }
+      };
+
+      set(flags & A, 1u << 0);
+      set(flags & B, 1u << 1);
+      set(flags & X, 1u << 2);
+      set(flags & Y, 1u << 3);
+      set(flags & LEFT_BUTTON, 1u << 4);
+      set(flags & RIGHT_BUTTON, 1u << 5);
+      set(flags & LEFT_STICK, 1u << 6);
+      set(flags & RIGHT_STICK, 1u << 7);
+      set(flags & BACK, 1u << 8);
+      set(flags & START, 1u << 9);
+      set(flags & HOME, 1u << 10);
+      set(flags & MISC_BUTTON, 1u << 11);
+      set(flags & DPAD_UP, 1u << 12);
+      set(flags & DPAD_DOWN, 1u << 13);
+      set(flags & DPAD_LEFT, 1u << 14);
+      set(flags & DPAD_RIGHT, 1u << 15);
+
+      return {
+        1,
+        buttons,
+        axis(state.lsX),
+        axis(state.lsY),
+        axis(state.rsX),
+        axis(state.rsY),
+        state.lt,
+        state.rt,
+      };
+    }
+
+    static HANDLE open_device() {
+      GUID hid_guid {};
+      HidD_GetHidGuid(&hid_guid);
+
+      unique_device_info_t devices {
+        SetupDiGetClassDevsW(&hid_guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE)
+      };
+      if (!devices || devices.get() == INVALID_HANDLE_VALUE) {
+        return nullptr;
+      }
+
+      for (DWORD index = 0;; ++index) {
+        SP_DEVICE_INTERFACE_DATA interface_data {};
+        interface_data.cbSize = sizeof(interface_data);
+        if (SetupDiEnumDeviceInterfaces(devices.get(), nullptr, &hid_guid, index, &interface_data) == FALSE) {
+          break;
+        }
+
+        DWORD required_size = 0;
+        static_cast<void>(SetupDiGetDeviceInterfaceDetailW(devices.get(), &interface_data, nullptr, 0, &required_size, nullptr));
+        if (required_size == 0) {
+          continue;
+        }
+
+        std::vector<std::byte> detail_buffer(required_size);
+        auto *detail = reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_W>(detail_buffer.data());
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        if (SetupDiGetDeviceInterfaceDetailW(devices.get(), &interface_data, detail, required_size, nullptr, nullptr) == FALSE) {
+          continue;
+        }
+
+        unique_handle_t candidate {
+          CreateFileW(
+            detail->DevicePath,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+          )
+        };
+        if (!candidate || candidate.get() == INVALID_HANDLE_VALUE) {
+          continue;
+        }
+
+        HIDD_ATTRIBUTES attributes {};
+        attributes.Size = sizeof(attributes);
+        if (HidD_GetAttributes(candidate.get(), &attributes) == FALSE) {
+          continue;
+        }
+
+        if (attributes.VendorID == 0xDEED && attributes.ProductID == 0xFEED) {
+          return candidate.release();
+        }
+      }
+
+      return nullptr;
+    }
+
+    int submit(const libvirtualhid_dev_report_t &report) const {
+      if (!device_) {
+        return -1;
+      }
+
+      std::array<std::uint8_t, sizeof(report)> buffer {};
+      std::memcpy(buffer.data(), &report, sizeof(report));
+      if (HidD_SetOutputReport(device_.get(), buffer.data(), static_cast<ULONG>(buffer.size())) == FALSE) {
+        BOOST_LOG(warning) << "Could not submit gamepad report to libvirtualhid-dev"sv;
+        return -1;
+      }
+
+      return 0;
+    }
+
+    unique_handle_t device_;
+    bool allocated_ = false;
   };
 
   /**
@@ -558,8 +771,25 @@ namespace platf {
     };
   }
 
+  std::vector<supported_gamepad_t> libvirtualhid_dev_supported_gamepads(const bool available) {
+    const auto reason = available ? "" : "gamepads.libvirtualhid-dev-not-available";
+    return {
+      {"auto", available, reason},
+      {"generic", available, reason},
+    };
+  }
+
   input_t input() {
     input_t result {new input_raw_t {}};
+
+    if (auto &raw = *result; config::input.controller && config::input.gamepad_driver == config::GAMEPAD_DRIVER_LIBVIRTUALHID_DEV) {
+      auto driver = std::make_unique<libvirtualhid_dev_t>();
+      if (!driver->init()) {
+        raw.libvirtualhid_dev = std::move(driver);
+      }
+
+      return result;
+    }
 
     if (auto &raw = *result; config::input.controller && !should_use_virtualhid_gamepads(raw) && virtualhid::should_try_vigembus_fallback(config::input.gamepad, false, config::input.gamepad_driver)) {
       if (config::input.gamepad_driver == config::GAMEPAD_DRIVER_VIGEMBUS) {
@@ -665,6 +895,10 @@ namespace platf {
 
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
     auto raw = (input_raw_t *) input.get();
+    if (raw->libvirtualhid_dev) {
+      return raw->libvirtualhid_dev->alloc_gamepad(id);
+    }
+
     const auto use_virtualhid = should_use_virtualhid_gamepads(*raw);
 
     if (use_virtualhid && virtualhid::alloc_gamepad(raw->virtualhid, id, metadata, feedback_queue) == 0) {
@@ -729,6 +963,10 @@ namespace platf {
   int rebind_gamepad(input_t &input, const gamepad_id_t &id, feedback_queue_t feedback_queue) {
     auto raw = (input_raw_t *) input.get();
 
+    if (raw->libvirtualhid_dev) {
+      return raw->libvirtualhid_dev->rebind_gamepad(id);
+    }
+
     if (virtualhid::has_gamepad(raw->virtualhid, id.globalIndex)) {
       return virtualhid::rebind_gamepad(raw->virtualhid, id, std::move(feedback_queue));
     }
@@ -742,6 +980,11 @@ namespace platf {
 
   void free_gamepad(input_t &input, int nr) {
     auto raw = (input_raw_t *) input.get();
+
+    if (raw->libvirtualhid_dev && raw->libvirtualhid_dev->has_gamepad(nr)) {
+      raw->libvirtualhid_dev->free_gamepad(nr);
+      return;
+    }
 
     if (virtualhid::has_gamepad(raw->virtualhid, nr)) {
       virtualhid::free_gamepad(raw->virtualhid, nr);
@@ -1007,6 +1250,11 @@ namespace platf {
    */
   void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
     auto raw = (input_raw_t *) input.get();
+    if (raw->libvirtualhid_dev && raw->libvirtualhid_dev->has_gamepad(nr)) {
+      raw->libvirtualhid_dev->update(gamepad_state);
+      return;
+    }
+
     if (virtualhid::has_gamepad(raw->virtualhid, nr)) {
       virtualhid::gamepad_update(raw->virtualhid, nr, gamepad_state);
       return;
@@ -1274,6 +1522,11 @@ namespace platf {
     }
 
     const auto raw = (input_raw_t *) input->get();
+    if (config::input.gamepad_driver == config::GAMEPAD_DRIVER_LIBVIRTUALHID_DEV) {
+      gps = libvirtualhid_dev_supported_gamepads(raw->libvirtualhid_dev != nullptr);
+      return gps;
+    }
+
     if (config::input.gamepad_driver == config::GAMEPAD_DRIVER_VIGEMBUS) {
       gps = vigembus_supported_gamepads(raw->vigem != nullptr);
       return gps;

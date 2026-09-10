@@ -249,6 +249,7 @@
     "gamepad_driver_all": "All Available Drivers",
     "gamepad_driver_desc": "Choose which virtual gamepad drivers Sunshine may use. All Available Drivers prefers Virtual HID Driver when licensed and falls back to ViGEmBus. Virtual HID Driver is an optional paid upgrade. ViGEmBus supports only Xbox 360 and DualShock 4, has limited features, and has reached end of life.",
     "gamepad_driver_select": "Choose a driver...",
+    "gamepad_driver_libvirtualhid_dev": "libvirtualhid-dev (experimental)",
     "gamepad_driver_vigembus": "ViGEmBus",
     "gamepad_driver_virtualhid": "Virtual HID Driver",
     "gamepad_ds4": "DS4 (PS4)",
