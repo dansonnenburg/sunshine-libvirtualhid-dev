@@ -20,5 +20,5 @@ if (-not $branch) {
 }
 
 git fetch $UpstreamRemote
-git rebase "$UpstreamRemote/$UpstreamBranch"
+git merge --no-edit "$UpstreamRemote/$UpstreamBranch"
 git push $ForkRemote $branch
