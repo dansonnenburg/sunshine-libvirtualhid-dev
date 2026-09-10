@@ -40,6 +40,7 @@ watch(
         <option value="all">{{ $t('config.gamepad_driver_all') }}</option>
         <option value="virtualhid">{{ $t('config.gamepad_driver_virtualhid') }}</option>
         <option value="vigembus">{{ $t('config.gamepad_driver_vigembus') }}</option>
+        <option value="libvirtualhid-dev">{{ $t('config.gamepad_driver_libvirtualhid_dev') }}</option>
       </select>
       <div class="form-text">{{ $t('config.gamepad_driver_desc') }}</div>
     </div>
@@ -73,12 +74,12 @@ watch(
 
           <template #windows>
             <option v-if="config.gamepad_driver !== 'vigembus'" value="generic">{{ $t("config.gamepad_generic") }}</option>
-            <option value="x360">{{ $t('config.gamepad_x360') }}</option>
-            <option v-if="config.gamepad_driver !== 'vigembus'" value="xone">{{ $t("config.gamepad_xone") }}</option>
-            <option v-if="config.gamepad_driver !== 'vigembus'" value="xseries">{{ $t("config.gamepad_xseries") }}</option>
-            <option value="ds4">{{ $t('config.gamepad_ds4') }}</option>
-            <option v-if="config.gamepad_driver !== 'vigembus'" value="ds5">{{ $t("config.gamepad_ds5") }}</option>
-            <option v-if="config.gamepad_driver !== 'vigembus'" value="switch">{{ $t("config.gamepad_switch") }}</option>
+            <option v-if="config.gamepad_driver !== 'libvirtualhid-dev'" value="x360">{{ $t('config.gamepad_x360') }}</option>
+            <option v-if="config.gamepad_driver !== 'vigembus' && config.gamepad_driver !== 'libvirtualhid-dev'" value="xone">{{ $t("config.gamepad_xone") }}</option>
+            <option v-if="config.gamepad_driver !== 'vigembus' && config.gamepad_driver !== 'libvirtualhid-dev'" value="xseries">{{ $t("config.gamepad_xseries") }}</option>
+            <option v-if="config.gamepad_driver !== 'libvirtualhid-dev'" value="ds4">{{ $t('config.gamepad_ds4') }}</option>
+            <option v-if="config.gamepad_driver !== 'vigembus' && config.gamepad_driver !== 'libvirtualhid-dev'" value="ds5">{{ $t("config.gamepad_ds5") }}</option>
+            <option v-if="config.gamepad_driver !== 'vigembus' && config.gamepad_driver !== 'libvirtualhid-dev'" value="switch">{{ $t("config.gamepad_switch") }}</option>
           </template>
         </PlatformLayout>
       </select>

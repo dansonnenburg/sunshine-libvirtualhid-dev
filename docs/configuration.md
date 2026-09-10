@@ -337,7 +337,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="3">Choices</td>
+        <td rowspan="4">Choices</td>
         <td>all</td>
         <td>Prefer Virtual HID Driver when it is available and licensed, with ViGEmBus as a limited fallback.</td>
     </tr>
@@ -348,6 +348,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>vigembus</td>
         <td>Use only ViGEmBus for gamepads and hide Virtual HID Driver status and licensing details.</td>
+    </tr>
+    <tr>
+        <td>libvirtualhid-dev</td>
+        <td>Use Dan's experimental static HID gamepad driver. This supports one generic gamepad and is intended for local testing only.</td>
     </tr>
 </table>
 

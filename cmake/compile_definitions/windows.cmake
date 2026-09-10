@@ -101,6 +101,7 @@ list(PREPEND PLATFORM_LIBRARIES
         minhook::minhook
         ntdll
         setupapi
+        hid
         shlwapi
         synchronization.lib
         userenv
