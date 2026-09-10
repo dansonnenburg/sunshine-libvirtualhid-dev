@@ -328,7 +328,7 @@ namespace nvhttp {
    * @brief Check whether a certificate exactly matches an enabled paired-client record.
    *
    * @param certificate Parsed client certificate to compare by canonical X.509 identity.
-   * @return `true` only when exactly one matching paired-client record is enabled.
+   * @return `true` when at least one matching paired-client record is enabled.
    * @note The caller must hold `client_auth_mutex()`.
    */
   bool is_client_enabled(const X509 *certificate) {
@@ -338,10 +338,9 @@ namespace nvhttp {
         continue;
       }
 
-      if (matched || !named_cert.enabled) {
-        return false;
+      if (named_cert.enabled) {
+        matched = true;
       }
-      matched = true;
     }
     return matched;
   }
@@ -1751,12 +1750,18 @@ namespace nvhttp {
    */
   std::pair<bool, std::string> get_client_status(const std::string_view cert_pem) {
     const client_t &client = client_root;
+    bool matched_disabled = false;
+    std::string disabled_name;
     for (const auto &named_cert : client.named_devices) {
       if (named_cert.cert == cert_pem) {
-        return {named_cert.enabled, named_cert.name};
+        if (named_cert.enabled) {
+          return {true, named_cert.name};
+        }
+        matched_disabled = true;
+        disabled_name = named_cert.name;
       }
     }
-    return {true, {}};
+    return {!matched_disabled, disabled_name};
   }
 
 #ifdef SUNSHINE_TESTS
