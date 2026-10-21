@@ -11,6 +11,8 @@
   "dependencies": {
     "@lucide/vue": "1.43.0",
     "bootstrap": "5.3.8",
+    "brace-expansion": "^1.1.21",
+    "compression": "^1.8.2",
     "date-fns": "4.4.0",
     "marked": "18.0.12",
     "vue": "3.5.42",
