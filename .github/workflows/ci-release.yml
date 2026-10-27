@@ -15,6 +15,7 @@ concurrency:
 jobs:
   copr:
     name: Copr
+    if: github.repository_owner == 'LizardByte'
     permissions:
       contents: write  # needed to update releases
     uses: ./.github/workflows/ci-copr.yml

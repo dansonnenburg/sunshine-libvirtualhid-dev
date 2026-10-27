@@ -68,6 +68,10 @@ jobs:
             msystem: clangarm64
             toolchain: clang-aarch64
     steps:
+      - name: Enable long paths before recursive checkout
+        shell: pwsh
+        run: git config --global core.longpaths true
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

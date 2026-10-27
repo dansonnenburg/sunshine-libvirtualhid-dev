@@ -3,10 +3,9 @@ name: CI
 permissions: {}
 
 on:
-  pull_request:
   push:
-    branches:
-      - master
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 concurrency:
@@ -75,6 +74,8 @@ jobs:
 
   build-homebrew:
     name: Homebrew
+    # Upstream formula validation assumes a public source repo and bot secrets.
+    if: github.repository_owner == 'LizardByte'
     needs: release-setup
     permissions:
       contents: read
@@ -131,7 +132,7 @@ jobs:
 
   build-linux-copr:
     name: Linux Copr
-    if: github.event_name != 'push'  # releases are handled directly in ci-release.yml
+    if: github.repository_owner == 'LizardByte' && github.event_name != 'push'
     needs: release-setup
     permissions:
       contents: write  # needed to update releases
