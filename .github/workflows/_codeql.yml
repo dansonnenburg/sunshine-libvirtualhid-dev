@@ -22,7 +22,8 @@ jobs:
   call-codeql:
     name: CodeQL
     uses: LizardByte/.github/.github/workflows/__call-codeql.yml@master
-    if: ${{ github.repository != 'LizardByte/.github' }}
+    # Private fork has no code-scanning entitlement. Explicit opt-in only.
+    if: github.repository_owner == 'LizardByte' || vars.ENABLE_CODEQL == 'true'
     permissions:
       actions: read
       contents: read

@@ -17,7 +17,8 @@ jobs:
   lint:
     name: Common Lint
     uses: LizardByte/.github/.github/workflows/__call-common-lint.yml@master
-    if: ${{ github.repository != 'LizardByte/.github' }}
+    # The fork checks changed C/C++ files in PR Checks, not upstream-wide debt.
+    if: github.repository_owner == 'LizardByte'
     permissions:
       contents: read
       pull-requests: read
