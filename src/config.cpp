@@ -4,6 +4,9 @@
  */
 // standard includes
 #include <algorithm>
+#include <array>
+#include <charconv>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -47,7 +50,7 @@
   #include <ffnvcodec/nvEncodeAPI.h>
 #endif
 
-#if (defined(linux) || defined(__FreeBSD__)) && !defined(DOXYGEN)
+#if defined(SUNSHINE_BUILD_VAAPI) && !defined(DOXYGEN)
   // For VAAPI rate control types
   #include <va/va.h>
 #endif
@@ -64,6 +67,10 @@ namespace config {
 
   namespace nv {
 
+    std::string ffmpeg_preset_from_quality(const int quality_preset) {
+      return std::format("p{}", quality_preset);
+    }
+
     /**
      * @brief Parse the `nvenc_twopass` configuration value.
      *
@@ -71,17 +78,18 @@ namespace config {
      * @return Parsed enum value, or the setting-specific default when the text is unknown.
      */
     nvenc::nvenc_two_pass twopass_from_view(const std::string_view &preset) {
+      using enum nvenc::nvenc_two_pass;
       if (preset == "disabled") {
-        return nvenc::nvenc_two_pass::disabled;
+        return disabled;
       }
       if (preset == "quarter_res") {
-        return nvenc::nvenc_two_pass::quarter_resolution;
+        return quarter_resolution;
       }
       if (preset == "full_res") {
-        return nvenc::nvenc_two_pass::full_resolution;
+        return full_resolution;
       }
       BOOST_LOG(warning) << "config: unknown nvenc_twopass value: " << preset;
-      return nvenc::nvenc_two_pass::quarter_resolution;
+      return quarter_resolution;
     }
 
     /**
@@ -267,7 +275,9 @@ namespace config {
       _CONVERT_(balanced);
       _CONVERT_(quality);
       _CONVERT_(speed);
-#undef _CONVERT_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+#endif
       return original;
     }
 
@@ -289,7 +299,9 @@ namespace config {
       _CONVERT_(cqp);
       _CONVERT_(vbr_latency);
       _CONVERT_(vbr_peak);
-#undef _CONVERT_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+#endif
       return original;
     }
 
@@ -312,7 +324,9 @@ namespace config {
       _CONVERT_(transcoding);
       _CONVERT_(ultralowlatency);
       _CONVERT_(webcam);
-#undef _CONVERT_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+#endif
       return original;
     }
 
@@ -379,7 +393,9 @@ namespace config {
       _CONVERT_(fast);
       _CONVERT_(faster);
       _CONVERT_(veryfast);
-#undef _CONVERT_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+#endif
       return std::nullopt;
     }
 
@@ -405,7 +421,7 @@ namespace config {
   }  // namespace qsv
 
   namespace vaapi {
-#if !(defined(linux) || defined(__FreeBSD__)) || defined(DOXYGEN)
+#if !defined(SUNSHINE_BUILD_VAAPI) || defined(DOXYGEN)
     constexpr int VA_RC_CBR = 0x00000002;  ///< CBR rate control
     constexpr int VA_RC_VBR = 0x00000004;  ///< VBR rate control
     constexpr int VA_RC_CQP = 0x00000010;  ///< CQP rate control
@@ -519,34 +535,6 @@ namespace config {
     }
 
     /**
-     * @brief Parse whether VideoToolbox software encoding is allowed.
-     *
-     * @param software Whether the software encoder path is being configured.
-     * @return Parsed enum value, or the setting-specific default when the text is unknown.
-     */
-    int allow_software_from_view(const std::string_view &software) {
-      if (software == "allowed"sv || software == "forced") {
-        return 1;
-      }
-
-      return 0;
-    }
-
-    /**
-     * @brief Parse whether VideoToolbox software encoding is forced.
-     *
-     * @param software Whether the software encoder path is being configured.
-     * @return Parsed enum value, or the setting-specific default when the text is unknown.
-     */
-    int force_software_from_view(const std::string_view &software) {
-      if (software == "forced") {
-        return 1;
-      }
-
-      return 0;
-    }
-
-    /**
      * @brief Parse the VideoToolbox realtime encoder flag.
      *
      * @param rt Real-time encoder usage selector.
@@ -584,7 +572,9 @@ namespace config {
       _CONVERT_(veryfast, 10);
       _CONVERT_(superfast, 11);
       _CONVERT_(ultrafast, 12);
-#undef _CONVERT_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+#endif
       return 11;  // Default to superfast
     }
   }  // namespace sw
@@ -607,7 +597,9 @@ namespace config {
       _CONVERT_(ensure_active);
       _CONVERT_(ensure_primary);
       _CONVERT_(ensure_only_display);
-#undef _CONVERT_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+#endif
       return video_t::dd_t::config_option_e::disabled;  // Default to this if value is invalid
     }
 
@@ -627,8 +619,10 @@ namespace config {
       _CONVERT_(disabled);
       _CONVERT_2_ARG_(auto, automatic);
       _CONVERT_(manual);
-#undef _CONVERT_
-#undef _CONVERT_2_ARG_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+  #undef _CONVERT_2_ARG_
+#endif
       return video_t::dd_t::resolution_option_e::disabled;  // Default to this if value is invalid
     }
 
@@ -648,8 +642,10 @@ namespace config {
       _CONVERT_(disabled);
       _CONVERT_2_ARG_(auto, automatic);
       _CONVERT_(manual);
-#undef _CONVERT_
-#undef _CONVERT_2_ARG_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+  #undef _CONVERT_2_ARG_
+#endif
       return video_t::dd_t::refresh_rate_option_e::disabled;  // Default to this if value is invalid
     }
 
@@ -668,8 +664,10 @@ namespace config {
 #endif
       _CONVERT_(disabled);
       _CONVERT_2_ARG_(auto, automatic);
-#undef _CONVERT_
-#undef _CONVERT_2_ARG_
+#ifndef DOXYGEN
+  #undef _CONVERT_
+  #undef _CONVERT_2_ARG_
+#endif
       return video_t::dd_t::hdr_option_e::disabled;  // Default to this if value is invalid
     }
 
@@ -717,6 +715,9 @@ namespace config {
     0,  // av1_mode
 
     2,  // min_threads
+
+    0,  // max_stream_width
+    0,  // max_stream_height
     {
       "superfast"s,  // preset
       "zerolatency"s,  // tune
@@ -736,25 +737,23 @@ namespace config {
     },  // qsv
 
     {
-      (int) amd::usage_h264_e::ultralowlatency,  // usage (h264)
-      (int) amd::usage_hevc_e::ultralowlatency,  // usage (hevc)
-      (int) amd::usage_av1_e::ultralowlatency,  // usage (av1)
-      (int) amd::rc_h264_e::vbr_latency,  // rate control (h264)
-      (int) amd::rc_hevc_e::vbr_latency,  // rate control (hevc)
-      (int) amd::rc_av1_e::vbr_latency,  // rate control (av1)
+      std::to_underlying(amd::usage_h264_e::ultralowlatency),  // usage (h264)
+      std::to_underlying(amd::usage_hevc_e::ultralowlatency),  // usage (hevc)
+      std::to_underlying(amd::usage_av1_e::ultralowlatency),  // usage (av1)
+      std::to_underlying(amd::rc_h264_e::vbr_latency),  // rate control (h264)
+      std::to_underlying(amd::rc_hevc_e::vbr_latency),  // rate control (hevc)
+      std::to_underlying(amd::rc_av1_e::vbr_latency),  // rate control (av1)
       0,  // enforce_hrd
-      (int) amd::quality_h264_e::balanced,  // quality (h264)
-      (int) amd::quality_hevc_e::balanced,  // quality (hevc)
-      (int) amd::quality_av1_e::balanced,  // quality (av1)
+      std::to_underlying(amd::quality_h264_e::balanced),  // quality (h264)
+      std::to_underlying(amd::quality_hevc_e::balanced),  // quality (hevc)
+      std::to_underlying(amd::quality_av1_e::balanced),  // quality (av1)
       0,  // preanalysis
       1,  // vbaq
       {},  // max_au_size (disabled by default)
-      (int) amd::coder_e::_auto,  // coder
+      std::to_underlying(amd::coder_e::_auto),  // coder
     },  // amd
 
     {
-      0,
-      0,
       1,
       -1,
     },  // vt
@@ -770,9 +769,11 @@ namespace config {
     {
       2,  // vk.tune (default: ll - low latency)
       2,  // vk.rc_mode (default: cbr)
+      2,  // vk.quality (default: 2 = balanced, 1 = speed, 3 = quality)
     },
 
     {},  // capture
+    false,  // fp16_sdr_gamma_encoded
     {},  // encoder
     {},  // adapter_name
     {},  // output_name
@@ -802,6 +803,7 @@ namespace config {
     {},  // virtual_sink
     true,  // stream audio
     true,  // install_steam_drivers
+    false,  // external_audio
   };
 
   /**
@@ -817,6 +819,7 @@ namespace config {
     ENCRYPTION_MODE_NEVER,  // lan_encryption_mode
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
     0,  // packetsize
+    true,  // dscp_tagging
   };
 
   /**
@@ -846,17 +849,15 @@ namespace config {
     500ms,  // key_repeat_delay
     std::chrono::duration<double> {1 / 24.9},  // key_repeat_period
 
-    {
-      platf::supported_gamepads(nullptr).front().name.data(),
-      platf::supported_gamepads(nullptr).front().name.size(),
-    },  // Default gamepad
-    {},  // gamepad_driver remains unset until the user chooses a Windows driver policy
+    "auto",  // Default gamepad profile.
+    {},  // Windows requests a backend choice; macOS defaults to Virtual HID Broker.
     true,  // back as touchpad click enabled for PlayStation-style gamepads
     true,  // client gamepads with motion events use PlayStation-style emulation
     true,  // client gamepads with touchpads use PlayStation-style emulation
     true,  // virtualhid_randomize_mac
 
     true,  // keyboard enabled
+    false,  // key_rightalt_to_key_win
     true,  // mouse enabled
     true,  // controller enabled
     true,  // always send scancodes
@@ -884,6 +885,7 @@ namespace config {
     false,  // notify_pre_releases
     true,  // system_tray
     {},  // prep commands
+    {},  // csrf_allowed_origins
   };
 
   /**
@@ -1013,14 +1015,13 @@ namespace config {
   /**
    * @brief Parse Sunshine configuration text into key-value entries.
    */
-  std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content) {
-    std::unordered_map<std::string, std::string> vars;
+  config_map_t parse_config(const std::string_view &file_content) {
+    config_map_t vars;
 
     auto pos = std::begin(file_content);
     auto end = std::end(file_content);
 
     while (pos < end) {
-      // auto newline = std::find_if(pos, end, [](auto ch) { return ch == '\n' || ch == '\r'; });
       TUPLE_2D(endl, var, parse_option(pos, end));
 
       pos = endl;
@@ -1032,7 +1033,7 @@ namespace config {
         continue;
       }
 
-      vars.emplace(std::move(*var));
+      vars.try_emplace(std::move(var->first), std::move(var->second));
     }
 
     return vars;
@@ -1071,15 +1072,15 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void string_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::string &input) {
+  void string_f(config_map_t &vars, const std::string &name, std::string &destination) {
     auto it = vars.find(name);
     if (it == std::end(vars)) {
       return;
     }
 
-    input = std::move(it->second);
+    destination = std::move(it->second);
 
     vars.erase(it);
   }
@@ -1089,15 +1090,15 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    * @param f Converter applied to the raw configuration string.
    */
   template<typename T, typename F>
-  void generic_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, T &input, F &&f) {
+  void generic_f(config_map_t &vars, const std::string &name, T &destination, F &&f) {
     std::string tmp;
     string_f(vars, name, tmp);
     if (!tmp.empty()) {
-      input = f(tmp);
+      destination = f(tmp);
     }
   }
 
@@ -1106,16 +1107,16 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    * @param allowed_vals Accepted string values for this setting.
    */
-  void string_restricted_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::string &input, const std::vector<std::string_view> &allowed_vals) {
+  void string_restricted_f(config_map_t &vars, const std::string &name, std::string &destination, const std::vector<std::string_view> &allowed_vals) {
     std::string temp;
     string_f(vars, name, temp);
 
     for (auto &allowed_val : allowed_vals) {
       if (temp == allowed_val) {
-        input = std::move(temp);
+        destination = std::move(temp);
         return;
       }
     }
@@ -1128,7 +1129,7 @@ namespace config {
    * @param name Setting name.
    * @param output Parsed string list.
    */
-  void string_list_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::vector<std::string> &output) {  // NOSONAR(cpp:S6045): transparent hasher not available for unordered_map in this codebase
+  void string_list_f(config_map_t &vars, const std::string &name, std::vector<std::string> &output) {
     std::string temp;
     string_f(vars, name, temp);
 
@@ -1154,9 +1155,9 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void path_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, fs::path &input) {
+  void path_f(config_map_t &vars, const std::string &name, fs::path &destination) {
     // appdata needs to be retrieved once only
     static auto appdata = platf::appdata();
 
@@ -1164,14 +1165,14 @@ namespace config {
     string_f(vars, name, temp);
 
     if (!temp.empty()) {
-      input = temp;
+      destination = temp;
     }
 
-    if (input.is_relative()) {
-      input = appdata / input;
+    if (destination.is_relative()) {
+      destination = appdata / destination;
     }
 
-    auto dir = input;
+    auto dir = destination;
     dir.remove_filename();
 
     // Ensure the directories exists
@@ -1185,14 +1186,14 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void path_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::string &input) {
-    fs::path temp = input;
+  void path_f(config_map_t &vars, const std::string &name, std::string &destination) {
+    fs::path temp = destination;
 
     path_f(vars, name, temp);
 
-    input = temp.string();
+    destination = temp.string();
   }
 
   /**
@@ -1217,16 +1218,16 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, int &input) {
+  void int_f(config_map_t &vars, const std::string &name, int &destination) {
     auto it = vars.find(name);
 
     if (it == std::end(vars)) {
       return;
     }
 
-    input = parse_config_integer(it->second);
+    destination = parse_config_integer(it->second);
     vars.erase(it);
   }
 
@@ -1235,16 +1236,16 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::optional<int> &input) {
+  void int_f(config_map_t &vars, const std::string &name, std::optional<int> &destination) {
     auto it = vars.find(name);
 
     if (it == std::end(vars)) {
       return;
     }
 
-    input = parse_config_integer(it->second);
+    destination = parse_config_integer(it->second);
     vars.erase(it);
   }
 
@@ -1253,15 +1254,15 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    * @param f Converter applied to the raw configuration string.
    */
   template<class F>
-  void int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, int &input, F &&f) {
+  void int_f(config_map_t &vars, const std::string &name, int &destination, F &&f) {
     std::string tmp;
     string_f(vars, name, tmp);
     if (!tmp.empty()) {
-      input = f(tmp);
+      destination = f(tmp);
     }
   }
 
@@ -1270,15 +1271,15 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    * @param f Converter applied to the raw configuration string.
    */
   template<class F>
-  void int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::optional<int> &input, F &&f) {
+  void int_f(config_map_t &vars, const std::string &name, std::optional<int> &destination, F &&f) {
     std::string tmp;
     string_f(vars, name, tmp);
     if (!tmp.empty()) {
-      input = f(tmp);
+      destination = f(tmp);
     }
   }
 
@@ -1287,17 +1288,17 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    * @param range Inclusive range accepted for the parsed value.
    */
-  void int_between_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, int &input, const std::pair<int, int> &range) {
-    int temp = input;
+  void int_between_f(config_map_t &vars, const std::string &name, int &destination, const std::pair<int, int> &range) {
+    int temp = destination;
 
     int_f(vars, name, temp);
 
     TUPLE_2D_REF(lower, upper, range);
     if (temp >= lower && temp <= upper) {
-      input = temp;
+      destination = temp;
     }
   }
 
@@ -1308,7 +1309,7 @@ namespace config {
    * @return True when the tested parser condition is met.
    */
   bool to_bool(std::string &boolean) {
-    std::for_each(std::begin(boolean), std::end(boolean), [](char ch) {
+    std::transform(std::begin(boolean), std::end(boolean), std::begin(boolean), [](unsigned char ch) {
       return (char) std::tolower(ch);
     });
 
@@ -1325,9 +1326,9 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void bool_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, bool &input) {
+  void bool_f(config_map_t &vars, const std::string &name, bool &destination) {
     std::string tmp;
     string_f(vars, name, tmp);
 
@@ -1335,7 +1336,7 @@ namespace config {
       return;
     }
 
-    input = to_bool(tmp);
+    destination = to_bool(tmp);
   }
 
   /**
@@ -1343,9 +1344,9 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void double_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, double &input) {
+  void double_f(config_map_t &vars, const std::string &name, double &destination) {
     std::string tmp;
     string_f(vars, name, tmp);
 
@@ -1360,7 +1361,7 @@ namespace config {
       return;
     }
 
-    input = val;
+    destination = val;
   }
 
   /**
@@ -1368,17 +1369,17 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    * @param range Inclusive range accepted for the parsed value.
    */
-  void double_between_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, double &input, const std::pair<double, double> &range) {
-    double temp = input;
+  void double_between_f(config_map_t &vars, const std::string &name, double &destination, const std::pair<double, double> &range) {
+    double temp = destination;
 
     double_f(vars, name, temp);
 
     TUPLE_2D_REF(lower, upper, range);
     if (temp >= lower && temp <= upper) {
-      input = temp;
+      destination = temp;
     }
   }
 
@@ -1387,9 +1388,9 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void list_string_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::vector<std::string> &input) {
+  void list_string_f(config_map_t &vars, const std::string &name, std::vector<std::string> &destination) {
     std::string string;
     string_f(vars, name, string);
 
@@ -1397,7 +1398,7 @@ namespace config {
       return;
     }
 
-    input.clear();
+    destination.clear();
 
     auto begin = std::cbegin(string);
     if (*begin == '[') {
@@ -1416,7 +1417,7 @@ namespace config {
       } else if (*pos == ']') {
         break;
       } else if (*pos == ',') {
-        input.emplace_back(begin, pos);
+        destination.emplace_back(begin, pos);
         pos = begin = std::find_if_not(pos + 1, std::cend(string), whitespace);
       } else {
         ++pos;
@@ -1424,7 +1425,7 @@ namespace config {
     }
 
     if (pos != begin) {
-      input.emplace_back(begin, pos);
+      destination.emplace_back(begin, pos);
     }
   }
 
@@ -1433,9 +1434,9 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void list_prep_cmd_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::vector<prep_cmd_t> &input) {
+  void list_prep_cmd_f(config_map_t &vars, const std::string &name, std::vector<prep_cmd_t> &destination) {
     std::string string;
     string_f(vars, name, string);
 
@@ -1457,7 +1458,7 @@ namespace config {
       auto undo_cmd = prep_cmd.get_optional<std::string>("undo"s);
       auto elevated = prep_cmd.get_optional<bool>("elevated"s);
 
-      input.emplace_back(do_cmd.value_or(""), undo_cmd.value_or(""), elevated.value_or(false));
+      destination.emplace_back(do_cmd.value_or(""), undo_cmd.value_or(""), elevated.value_or(false));
     }
   }
 
@@ -1466,9 +1467,9 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void list_int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::vector<int> &input) {
+  void list_int_f(config_map_t &vars, const std::string &name, std::vector<int> &destination) {
     std::vector<std::string> list;
     list_string_f(vars, name, list);
 
@@ -1480,7 +1481,7 @@ namespace config {
     // The framerate list must be cleared before adding values from the file configuration.
     // If the list is not cleared, then the specified parameters do not affect the behavior of the sunshine server.
     // That is, if you set only 30 fps in the configuration file, it will not work because by default, during initialization the list includes 10, 30, 60, 90 and 120 fps.
-    input.clear();
+    destination.clear();
     for (auto &el : list) {
       std::string_view val = el;
 
@@ -1497,7 +1498,7 @@ namespace config {
       } else {
         tmp = (int) util::from_view(val);
       }
-      input.emplace_back(tmp);
+      destination.emplace_back(tmp);
     }
   }
 
@@ -1506,9 +1507,9 @@ namespace config {
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    * @param name Configuration key to consume.
-   * @param input Destination field updated when the setting exists and parses successfully.
+   * @param destination Destination field updated when the setting exists and parses successfully.
    */
-  void map_int_int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::unordered_map<int, int> &input) {
+  void map_int_int_f(config_map_t &vars, const std::string &name, std::unordered_map<int, int> &destination) {
     std::vector<int> list;
     list_int_f(vars, name, list);
 
@@ -1523,7 +1524,7 @@ namespace config {
       auto key = list[x++];
       auto val = list[x++];
 
-      input.emplace(key, val);
+      destination.emplace(key, val);
     }
   }
 
@@ -1565,20 +1566,23 @@ namespace config {
    *
    * @return Platform-supported gamepad backend names accepted by configuration.
    */
-  std::vector<std::string_view> &get_supported_gamepad_options() {
-    const auto options = platf::supported_gamepads(nullptr);
-    static std::vector<std::string_view> opts {};
-    opts.reserve(options.size());
-    for (auto &opt : options) {
-      opts.emplace_back(opt.name);
-    }
-    return opts;
+  const std::vector<std::string_view> &get_supported_gamepad_options() {
+    static const auto gamepads = platf::supported_gamepads(nullptr);
+    static const auto options = []() {
+      std::vector<std::string_view> names;
+      names.reserve(gamepads.size());
+      for (const auto &gamepad : gamepads) {
+        names.emplace_back(gamepad.name);
+      }
+      return names;
+    }();
+    return options;
   }
 
   /**
    * @brief Log parsed configuration entries and optionally record them as modified.
    */
-  void log_config_settings(const std::unordered_map<std::string, std::string> &vars, bool save) {
+  void log_config_settings(const config_map_t &vars, bool save) {
     for (auto &[name, val] : vars) {
       bool is_redacted = std::ranges::find(config::redacted_config, name) != config::redacted_config.end();
 
@@ -1590,18 +1594,81 @@ namespace config {
     }
   }
 
+  bool cap_stream_resolution(int &width, int &height) {
+    if (video.max_stream_width <= 0 || video.max_stream_height <= 0 || width <= 0 || height <= 0 || (width <= video.max_stream_width && height <= video.max_stream_height)) {
+      return false;
+    }
+
+    // Scale by whichever dimension is further over its limit, in integer math so that dimension
+    // lands exactly on the cap.
+    const std::int64_t w = width;
+    const std::int64_t h = height;
+    const bool width_limited = w * video.max_stream_height >= h * video.max_stream_width;
+    const auto scaled_width = width_limited ? video.max_stream_width : static_cast<int>(w * video.max_stream_height / h);
+    const auto scaled_height = width_limited ? static_cast<int>(h * video.max_stream_width / w) : video.max_stream_height;
+    // Encoders and decoders expect even dimensions
+    const int capped_width = std::max(2, scaled_width & ~1);
+    const int capped_height = std::max(2, scaled_height & ~1);
+    BOOST_LOG(info) << "Capping stream resolution: "sv << width << 'x' << height
+                    << " -> "sv << capped_width << 'x' << capped_height;
+    width = capped_width;
+    height = capped_height;
+    return true;
+  }
+
+  /**
+   * @brief Parse a `<width>x<height>` resolution string.
+   *
+   * @param value Resolution text such as `2560x1440`.
+   * @param width Parsed width, written only on success.
+   * @param height Parsed height, written only on success.
+   * @return `true` when both dimensions are at least 2, the smallest even size the cap can produce.
+   */
+  bool parse_stream_resolution(const std::string_view &value, int &width, int &height) {
+    const auto separator = value.find('x');
+    if (separator == std::string::npos) {
+      return false;
+    }
+
+    const auto *const begin = value.data();
+    const auto *const end = begin + value.size();
+
+    int parsed_width = 0;
+    const auto [width_end, width_ec] = std::from_chars(begin, begin + separator, parsed_width);
+    if (width_ec != std::errc {} || width_end != begin + separator || parsed_width < 2) {
+      return false;
+    }
+
+    int parsed_height = 0;
+    const auto [height_end, height_ec] = std::from_chars(begin + separator + 1, end, parsed_height);
+    if (height_ec != std::errc {} || height_end != end || parsed_height < 2) {
+      return false;
+    }
+
+    width = parsed_width;
+    height = parsed_height;
+    return true;
+  }
+
   /**
    * @brief Apply parsed configuration entries to the global runtime configuration.
    *
    * @param vars Parsed configuration entries; consumed keys are erased.
    */
-  void apply_config(std::unordered_map<std::string, std::string> &&vars) {
+  void apply_config(config_map_t &&vars) {
     log_config_settings(vars, true);
 
     int_f(vars, "qp", video.qp);
     int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});
     int_between_f(vars, "av1_mode", video.av1_mode, {0, 3});
     int_f(vars, "min_threads", video.min_threads);
+
+    std::string max_stream_resolution;
+    string_f(vars, "max_stream_resolution", max_stream_resolution);
+    if (!max_stream_resolution.empty() && !parse_stream_resolution(max_stream_resolution, video.max_stream_width, video.max_stream_height)) {
+      BOOST_LOG(warning) << "max_stream_resolution must be formatted as <width>x<height>, e.g. 2560x1440: "sv << max_stream_resolution;
+    }
+
     string_f(vars, "sw_preset", video.sw.sw_preset);
     if (!video.sw.sw_preset.empty()) {
       video.sw.svtav1_preset = sw::svtav1_preset_from_view(video.sw.sw_preset);
@@ -1619,12 +1686,12 @@ namespace config {
     bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
-    video.nv_legacy.preset = video.nv.quality_preset + 11;
+    video.nv_legacy.preset = nv::ffmpeg_preset_from_quality(video.nv.quality_preset);
     video.nv_legacy.multipass = video.nv.two_pass == nvenc::nvenc_two_pass::quarter_resolution ? NV_ENC_TWO_PASS_QUARTER_RESOLUTION :
                                 video.nv.two_pass == nvenc::nvenc_two_pass::full_resolution    ? NV_ENC_TWO_PASS_FULL_RESOLUTION :
                                                                                                  NV_ENC_MULTI_PASS_DISABLED;
     video.nv_legacy.h264_coder = video.nv.h264_cavlc ? NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC : NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;
-    video.nv_legacy.aq = video.nv.adaptive_quantization;
+    video.nv_legacy.spatial_aq = video.nv.adaptive_quantization;
     video.nv_legacy.vbv_percentage_increase = video.nv.vbv_percentage_increase;
 #endif
 
@@ -1669,8 +1736,6 @@ namespace config {
     }
 
     int_f(vars, "vt_coder", video.vt.vt_coder, vt::coder_from_view);
-    int_f(vars, "vt_software", video.vt.vt_allow_sw, vt::allow_software_from_view);
-    int_f(vars, "vt_software", video.vt.vt_require_sw, vt::force_software_from_view);
     int_f(vars, "vt_realtime", video.vt.vt_realtime, vt::rt_from_view);
 
     std::string vaapi_quality;
@@ -1687,8 +1752,19 @@ namespace config {
 
     int_f(vars, "vk_tune", video.vk.tune);
     int_f(vars, "vk_rc_mode", video.vk.rc_mode);
+    std::string vk_quality;
+    string_f(vars, "vk_quality", vk_quality);
+    static const std::unordered_map<std::string_view, int> vk_quality_map = {
+      {"speed"sv, 1},
+      {"balanced"sv, 2},
+      {"quality"sv, 3}
+    };
+    if (auto it = vk_quality_map.find(vk_quality); it != vk_quality_map.end()) {
+      video.vk.quality = it->second;
+    }
 
     string_f(vars, "capture", video.capture);
+    bool_f(vars, "fp16_sdr_gamma_encoded", video.fp16_sdr_gamma_encoded);
     string_f(vars, "encoder", video.encoder);
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "output_name", video.output_name);
@@ -1734,6 +1810,7 @@ namespace config {
     string_f(vars, "virtual_sink", audio.virtual_sink);
     bool_f(vars, "stream_audio", audio.stream);
     bool_f(vars, "install_steam_audio_drivers", audio.install_steam_drivers);
+    bool_f(vars, "external_audio", audio.external_audio);
 
     string_restricted_f(vars, "origin_web_ui_allowed", nvhttp.origin_web_ui_allowed, {"pc"sv, "lan"sv, "wan"sv});
 
@@ -1771,6 +1848,7 @@ namespace config {
     int_between_f(vars, "lan_encryption_mode", stream.lan_encryption_mode, {0, 2});
     int_between_f(vars, "wan_encryption_mode", stream.wan_encryption_mode, {0, 2});
     int_between_f(vars, "packetsize", stream.packetsize, {0, PACKETSIZE_MAX});
+    bool_f(vars, "dscp_tagging", stream.dscp_tagging);
 
     path_f(vars, "file_apps", stream.file_apps);
 #ifndef __ANDROID__
@@ -1785,7 +1863,7 @@ namespace config {
     }
 #endif
 
-    int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
+    int_between_f(vars, "fec_percentage", stream.fec_percentage, {0, 100});
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
@@ -1823,6 +1901,7 @@ namespace config {
                                                                         GAMEPAD_DRIVER_VIRTUALHID,
                                                                         GAMEPAD_DRIVER_VIGEMBUS,
                                                                         GAMEPAD_DRIVER_LIBVIRTUALHID_DEV,
+                                                                        GAMEPAD_DRIVER_NONE,
                                                                       });
     string_restricted_f(vars, "gamepad"s, input.gamepad, get_supported_gamepad_options());
 #ifdef _WIN32
@@ -1954,7 +2033,7 @@ namespace config {
    * @brief Parse serialized text into the corresponding runtime representation.
    */
   int parse(int argc, char *argv[]) {
-    std::unordered_map<std::string, std::string> cmd_vars;
+    config_map_t cmd_vars;
 #ifdef _WIN32
     bool shortcut_launch = false;
     bool service_admin_launch = false;
@@ -2006,7 +2085,7 @@ namespace config {
             cmd_vars.erase(it);
           }
 
-          cmd_vars.emplace(std::move(*var));
+          cmd_vars.try_emplace(std::move(var->first), std::move(var->second));
         }
       }
     }
@@ -2025,7 +2104,7 @@ namespace config {
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
 
       for (auto &[name, value] : cmd_vars) {
-        vars.insert_or_assign(std::move(name), std::move(value));
+        vars.insert_or_assign(name, std::move(value));
       }
 
       // Apply the config. Note: This will try to create any paths
@@ -2068,14 +2147,14 @@ namespace config {
     if (shortcut_launch) {
       if (!service_ctrl::is_service_running()) {
         // If the service isn't running, relaunch ourselves as admin to start it
-        WCHAR executable[MAX_PATH];
-        GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
+        std::array<WCHAR, MAX_PATH> executable;
+        GetModuleFileNameW(nullptr, executable.data(), executable.size());
 
         SHELLEXECUTEINFOW shell_exec_info {};
         shell_exec_info.cbSize = sizeof(shell_exec_info);
         shell_exec_info.fMask = SEE_MASK_NOASYNC | SEE_MASK_NO_CONSOLE | SEE_MASK_NOCLOSEPROCESS;
         shell_exec_info.lpVerb = L"runas";
-        shell_exec_info.lpFile = executable;
+        shell_exec_info.lpFile = executable.data();
         shell_exec_info.lpParameters = L"--shortcut-admin";
         shell_exec_info.nShow = SW_NORMAL;
         if (!ShellExecuteExW(&shell_exec_info)) {

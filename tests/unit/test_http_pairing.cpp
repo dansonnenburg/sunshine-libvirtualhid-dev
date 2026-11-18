@@ -151,6 +151,8 @@ TEST_P(PairingTest, Run) {
   auto input_client_cert = input.session->client.cert;  // Will be moved
   clientpairingsecret(*input.session, tree, input.client_pairing_secret);
   ASSERT_EQ(tree.get<int>("root.paired") == 1, expected.phase_4_success);
+  ASSERT_TRUE(input.session->completion->result.has_value());
+  EXPECT_EQ(*input.session->completion->result, expected.phase_4_success);
 
   if (expected.phase_4_success) {
     ASSERT_TRUE(nvhttp::test_support::authorize_client_certificate(input_client_cert));
@@ -260,7 +262,7 @@ INSTANTIATE_TEST_SUITE_P(
     /**
      * null values (phase 1)
      */
-    std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>()}, pairing_output {false}),
+    std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>()}, pairing_output {.phase_1_success = false}),
     /**
      * null values (phase 4, phase 2 and 3 have no reason to fail since we are running them in order)
      */
@@ -416,6 +418,7 @@ namespace {
       BaseTest::SetUp();
       expire_pair_sessions(std::chrono::steady_clock::time_point::max());
       original_pin_stdin_ = config::sunshine.flags[config::flag::PIN_STDIN];
+      original_ping_timeout_ = config::stream.ping_timeout;
       config::sunshine.flags[config::flag::PIN_STDIN] = false;
 
       server_ = std::make_unique<SimpleWeb::Server<SimpleWeb::HTTP>>();
@@ -453,6 +456,7 @@ namespace {
       client_.reset();
       server_.reset();
       config::sunshine.flags[config::flag::PIN_STDIN] = original_pin_stdin_;
+      config::stream.ping_timeout = original_ping_timeout_;
       BaseTest::TearDown();
     }
 
@@ -503,6 +507,7 @@ namespace {
     std::jthread server_thread_;  ///< Thread running the local server event loop.
     std::atomic<unsigned short> port_ {0};  ///< Ephemeral port assigned to the local server.
     bool original_pin_stdin_;  ///< Console-PIN flag restored after each test.
+    std::chrono::milliseconds original_ping_timeout_;  ///< Configured client timeout restored after each test.
   };
 }  // namespace
 
@@ -514,6 +519,21 @@ TEST_F(PairingHttpHandlerTest, ImmediateRequestsReturnExpectedStatus) {
   std::string pairing_id;
   ASSERT_EQ(insert_pair_session(pending_session("out-of-order", "Client", "192.0.2.10"), pairing_id), pair_session_insert_e::ADDED);
   EXPECT_NE(request("/pair?uniqueid=out-of-order&clientchallenge=00"sv).find("Out of order"), std::string::npos);
+}
+
+/**
+ * @brief HTTP dispatch reaches every pairing phase and rejects an unknown phase.
+ */
+TEST_F(PairingHttpHandlerTest, DispatchesEachPhaseAndRejectsUnknownRequests) {
+  for (const auto phase : {"clientchallenge", "serverchallengeresp", "clientpairingsecret", "unknown"}) {
+    std::string pairing_id;
+    ASSERT_EQ(insert_pair_session(pending_session(phase, "Client", "192.0.2.10"), pairing_id), pair_session_insert_e::ADDED);
+    const auto response = request(std::format("/pair?uniqueid={}&{}=00", phase, phase));
+    EXPECT_NE(response.find("status_code=\"400\""), std::string::npos);
+    const auto expected = std::string_view {phase} == "unknown" ? "Invalid pairing request" : "Out of order";
+    EXPECT_NE(response.find(expected), std::string::npos) << phase;
+    EXPECT_TRUE(get_pending_pairings().empty());
+  }
 }
 
 TEST_F(PairingHttpHandlerTest, WebApprovalRequestRemainsPendingUntilCancelled) {
@@ -529,6 +549,45 @@ TEST_F(PairingHttpHandlerTest, WebApprovalRequestRemainsPendingUntilCancelled) {
   EXPECT_NE(response.get().find("cancelled by operator"), std::string::npos);
 }
 
+TEST_F(PairingHttpHandlerTest, PinReturnsCompletedHandshakeResult) {
+  for (const bool expected_result : {false, true}) {
+    const auto unique_id = expected_result ? "successful-result"sv : "failed-result"sv;
+    std::packaged_task<std::string()> request_task {[this, unique_id]() {
+      return request(server_certificate_target(unique_id));
+    }};
+    auto client_response = request_task.get_future();
+    std::jthread request_thread {std::move(request_task)};
+
+    const auto pairing_id = wait_for_pending_pairing();
+    ASSERT_FALSE(pairing_id.empty());
+    config::stream.ping_timeout = std::chrono::seconds {2};
+    std::packaged_task<bool()> pin_task {[&pairing_id]() {
+      return pin(pairing_id, "5338", "Test client");
+    }};
+    auto pin_result = pin_task.get_future();
+    std::jthread pin_thread {std::move(pin_task)};
+
+    EXPECT_NE(client_response.get().find("status_code=\"200\""), std::string::npos);
+    EXPECT_TRUE(nvhttp::test_support::complete_pairing(pairing_id, expected_result));
+    EXPECT_EQ(pin_result.get(), expected_result);
+  }
+}
+
+TEST_F(PairingHttpHandlerTest, PinReturnsFalseWhenClientDoesNotCompleteHandshake) {
+  std::packaged_task<std::string()> request_task {[this]() {
+    return request(server_certificate_target("wrong-pin"));
+  }};
+  auto client_response = request_task.get_future();
+  std::jthread request_thread {std::move(request_task)};
+
+  const auto pairing_id = wait_for_pending_pairing();
+  ASSERT_FALSE(pairing_id.empty());
+  config::stream.ping_timeout = std::chrono::milliseconds {50};
+  EXPECT_FALSE(pin(pairing_id, "0000", "Test client"));
+  EXPECT_NE(client_response.get().find("status_code=\"200\""), std::string::npos);
+  EXPECT_TRUE(get_pending_pairings().empty());
+}
+
 TEST_F(PairingHttpHandlerTest, DuplicateAndCapacityErrorsReturnImmediately) {
   std::string pairing_id;
   ASSERT_EQ(insert_pair_session(pending_session("duplicate", "Original", "192.0.2.10"), pairing_id), pair_session_insert_e::ADDED);
@@ -542,6 +601,47 @@ TEST_F(PairingHttpHandlerTest, DuplicateAndCapacityErrorsReturnImmediately) {
     );
   }
   EXPECT_NE(request(server_certificate_target("overflow")).find("status_code=\"503\""), std::string::npos);
+}
+
+TEST_F(PairingHttpHandlerTest, RetriedGetservercertReplacesAbandonedHandshake) {
+  // First attempt: start pairing and approve the PIN, leaving the session mid-handshake.
+  std::packaged_task<std::string()> first_request_task {[this]() {
+    return request(server_certificate_target("retry"));
+  }};
+  auto first_response = first_request_task.get_future();
+  std::jthread first_request_thread {std::move(first_request_task)};
+
+  const auto first_pairing_id = wait_for_pending_pairing();
+  ASSERT_FALSE(first_pairing_id.empty());
+  config::stream.ping_timeout = std::chrono::seconds {10};
+  std::packaged_task<bool()> pin_task {[&first_pairing_id]() {
+    return pin(first_pairing_id, "5338", "Test client");
+  }};
+  auto pin_result = pin_task.get_future();
+  std::jthread pin_thread {std::move(pin_task)};
+
+  // PIN approval answers the held request and advances the session past the certificate
+  // phase, so it no longer appears in the pending list.
+  EXPECT_NE(first_response.get().find("status_code=\"200\""), std::string::npos);
+  for (int attempt = 0; attempt < 100 && !get_pending_pairings().empty(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds {10});
+  }
+  EXPECT_TRUE(get_pending_pairings().empty());
+
+  // A fresh getservercert for the same client replaces the abandoned handshake instead
+  // of failing with 409 until the session expires.
+  std::packaged_task<std::string()> retry_request_task {[this]() {
+    return request(server_certificate_target("retry"));
+  }};
+  auto retry_response = retry_request_task.get_future();
+  std::jthread retry_request_thread {std::move(retry_request_task)};
+
+  const auto second_pairing_id = wait_for_pending_pairing();
+  ASSERT_FALSE(second_pairing_id.empty());
+  EXPECT_NE(second_pairing_id, first_pairing_id);
+  EXPECT_FALSE(pin_result.get());  // The evicted handshake's waiter is woken with failure.
+  EXPECT_TRUE(cancel_pairing(second_pairing_id));
+  EXPECT_NE(retry_response.get().find("cancelled by operator"), std::string::npos);
 }
 
 TEST_F(PairingHttpHandlerTest, ConsolePinCompletesOrRejectsTheCertificatePhase) {

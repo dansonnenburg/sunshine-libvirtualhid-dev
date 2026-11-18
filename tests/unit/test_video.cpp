@@ -7,11 +7,16 @@
 
 // standard includes
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
+
+// lib includes
+#include <display_device/types.h>
 
 // ffmpeg includes
 extern "C" {
@@ -24,6 +29,84 @@ extern "C" {
 #include <src/video.h>
 
 using namespace std::literals;
+
+/**
+ * @brief Packet replacement rules retain the original non-owning byte views.
+ */
+TEST(VideoPacketReplacementTest, CopiesViewsWithoutCopyingTheirBackingBytes) {
+  std::string original = "__old__";
+  std::string replacement = "__new__";
+  const video::packet_raw_t::replace_t rule {std::string_view(original).substr(2, 3), std::string_view(replacement).substr(2, 3)};
+  EXPECT_EQ(rule.old, "old");
+  EXPECT_EQ(rule._new, "new");
+  EXPECT_EQ(rule.old.data(), original.data() + 2);
+  EXPECT_EQ(rule._new.data(), replacement.data() + 2);
+  original[2] = 'O';
+  replacement[2] = 'N';
+  EXPECT_EQ(rule.old, "Old");
+  EXPECT_EQ(rule._new, "New");
+}
+
+TEST(VideoEncoderProbingTest, AllowsProbingWhenNoDevicesAreEnumerated) {
+  EXPECT_TRUE(video::allow_encoder_probing({}));
+}
+
+TEST(VideoEncoderProbingTest, AllowsProbingWithAnActiveDevice) {
+  std::vector<display_device::EnumeratedDevice> devices(2);
+  devices[1].m_info = display_device::EnumeratedDevice::Info {};
+  EXPECT_TRUE(video::allow_encoder_probing(devices));
+}
+
+TEST(VideoEncoderProbingTest, InactiveDevicesBlockProbingOnlyOnWindows) {
+  // A sleeping display enumerates without additional info, i.e. as inactive.
+  const std::vector<display_device::EnumeratedDevice> devices(2);
+#ifdef _WIN32
+  EXPECT_FALSE(video::allow_encoder_probing(devices));
+#else
+  EXPECT_TRUE(video::allow_encoder_probing(devices));
+#endif
+}
+
+TEST(VideoFormatMappingTest, MapsSupportedHardwareDevicesAndRejectsUnsupportedOnes) {
+  using enum platf::mem_type_e;
+  const std::array cases {
+    std::pair {AV_HWDEVICE_TYPE_D3D11VA, dxgi},
+    std::pair {AV_HWDEVICE_TYPE_VAAPI, vaapi},
+    std::pair {AV_HWDEVICE_TYPE_CUDA, cuda},
+    std::pair {AV_HWDEVICE_TYPE_NONE, system},
+#ifdef SUNSHINE_BUILD_VULKAN
+    std::pair {AV_HWDEVICE_TYPE_VULKAN, vulkan},
+#else
+    std::pair {AV_HWDEVICE_TYPE_VULKAN, unknown},
+#endif
+    std::pair {AV_HWDEVICE_TYPE_DXVA2, unknown},
+    std::pair {AV_HWDEVICE_TYPE_VIDEOTOOLBOX, unknown},
+  };
+
+  for (const auto &[format, expected] : cases) {
+    EXPECT_EQ(video::map_base_dev_type(format), expected) << format;
+  }
+}
+
+TEST(VideoFormatMappingTest, MapsSupportedPixelFormatsAndRejectsUnsupportedOnes) {
+  using enum platf::pix_fmt_e;
+  const std::array cases {
+    std::pair {AV_PIX_FMT_VUYX, ayuv},
+    std::pair {AV_PIX_FMT_XV30, y410},
+    std::pair {AV_PIX_FMT_YUV420P10, yuv420p10},
+    std::pair {AV_PIX_FMT_YUV420P, yuv420p},
+    std::pair {AV_PIX_FMT_NV12, nv12},
+    std::pair {AV_PIX_FMT_P010, p010},
+    std::pair {AV_PIX_FMT_YUV444P, yuv444p},
+    std::pair {AV_PIX_FMT_YUV444P16, yuv444p16},
+    std::pair {AV_PIX_FMT_NONE, unknown},
+    std::pair {AV_PIX_FMT_RGB24, unknown},
+  };
+
+  for (const auto &[format, expected] : cases) {
+    EXPECT_EQ(video::map_pix_fmt(format), expected) << format;
+  }
+}
 
 struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {
   void SetUp() override {
@@ -41,29 +124,61 @@ struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encode
   }
 };
 
+/**
+ * @brief Available encoder backends for this platform.
+ */
+const auto encoder_variants = std::to_array<video::encoder_t *>({
+#if !defined(__APPLE__)
+  &video::nvenc,
+#endif
+#ifdef _WIN32
+  &video::amdvce,
+  &video::quicksync,
+#endif
+#if defined(__linux__) || defined(__FreeBSD__)
+  &video::vaapi,
+#endif
+#ifdef __APPLE__
+  &video::videotoolbox,
+#endif
+  &video::software
+});
+
 INSTANTIATE_TEST_SUITE_P(
   EncoderVariants,
   EncoderTest,
-  testing::Values(
-#if !defined(__APPLE__)
-    &video::nvenc,
-#endif
-#ifdef _WIN32
-    &video::amdvce,
-    &video::quicksync,
-#endif
-#if defined(__linux__) || defined(__FreeBSD__)
-    &video::vaapi,
-#endif
-#ifdef __APPLE__
-    &video::videotoolbox,
-#endif
-    &video::software
-  ),
+  testing::ValuesIn(encoder_variants),
   [](const auto &info) {
     return std::string(info.param->name);
   }
 );
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+TEST(NvencAvcodecOptionsTest, UsesVersionStablePresetAndSpatialAqNames) {
+  const std::array codecs {
+    &video::nvenc.av1,
+    &video::nvenc.hevc,
+    &video::nvenc.h264,
+  };
+
+  for (const auto *codec : codecs) {
+    const auto preset = std::ranges::find(codec->common_options, "preset"sv, &video::encoder_t::option_t::name);
+    ASSERT_NE(codec->common_options.end(), preset);
+    ASSERT_TRUE(std::holds_alternative<std::string *>(preset->value));
+    EXPECT_EQ(&config::video.nv_legacy.preset, std::get<std::string *>(preset->value));
+
+    const auto spatial_aq = std::ranges::find(codec->common_options, "spatial-aq"sv, &video::encoder_t::option_t::name);
+    ASSERT_NE(codec->common_options.end(), spatial_aq);
+    ASSERT_TRUE(std::holds_alternative<int *>(spatial_aq->value));
+    EXPECT_EQ(&config::video.nv_legacy.spatial_aq, std::get<int *>(spatial_aq->value));
+
+    EXPECT_EQ(
+      codec->common_options.end(),
+      std::ranges::find(codec->common_options, "aq"sv, &video::encoder_t::option_t::name)
+    );
+  }
+}
+#endif
 
 TEST_P(EncoderTest, ValidateEncoder) {
   // todo:: test something besides fixture setup
@@ -148,6 +263,73 @@ INSTANTIATE_TEST_SUITE_P(
     std::make_tuple(1, 0, 0, false, false, 0)
   )
 );
+
+/**
+ * @brief Reset the published probe results before and after each test.
+ */
+struct EncoderProbeResultsTest: testing::Test {
+  /**
+   * @brief Start from an empty published state.
+   */
+  void SetUp() override {
+    video::reset_encoder_probe_results();
+  }
+
+  /**
+   * @brief Leave no published state behind for other tests.
+   */
+  void TearDown() override {
+    video::reset_encoder_probe_results();
+  }
+};
+
+TEST_F(EncoderProbeResultsTest, FailedCodecProbeDoesNotPublishCapabilities) {
+  video::encoder_t encoder {"test"sv, {}, {}, {}, {}, 0};
+  for (auto *codec : {&encoder.h264, &encoder.hevc, &encoder.av1}) {
+    (*codec)[video::encoder_t::PASSED] = false;
+    (*codec)[video::encoder_t::YUV444] = true;
+    (*codec)[video::encoder_t::DYNAMIC_RANGE] = true;
+    (*codec)[video::encoder_t::DYNAMIC_RANGE_YUV444] = true;
+  }
+
+  video::record_encoder_probe_results(encoder);
+
+  for (std::size_t i = 0; i < 3; ++i) {
+    EXPECT_FALSE(video::last_encoder_probe_supported_yuv444_for_codec[i]) << i;
+    EXPECT_FALSE(video::last_encoder_probe_supported_dynamic_range_for_codec[i]) << i;
+    EXPECT_FALSE(video::last_encoder_probe_supported_dynamic_range_yuv444_for_codec[i]) << i;
+  }
+}
+
+TEST_F(EncoderProbeResultsTest, SubsequentProbeReplacesPriorResults) {
+  constexpr uint32_t ref_frames_invalidation = 1 << 8;  // Mirrors REF_FRAMES_INVALIDATION in video.cpp.
+  video::encoder_t first {"first"sv, {}, {}, {}, {}, ref_frames_invalidation};
+  for (auto *codec : {&first.h264, &first.hevc, &first.av1}) {
+    (*codec)[video::encoder_t::PASSED] = true;
+    (*codec)[video::encoder_t::YUV444] = true;
+    (*codec)[video::encoder_t::DYNAMIC_RANGE] = true;
+    (*codec)[video::encoder_t::DYNAMIC_RANGE_YUV444] = true;
+  }
+
+  // The second encoder only supports plain 8-bit 4:2:0 H.264.
+  video::encoder_t second {"second"sv, {}, {}, {}, {}, 0};
+  second.h264[video::encoder_t::PASSED] = true;
+
+  video::record_encoder_probe_results(first);
+  ASSERT_TRUE(video::last_encoder_probe_supported_ref_frames_invalidation);
+  ASSERT_TRUE(video::last_encoder_probe_supported_yuv444_for_codec[1]);
+  ASSERT_TRUE(video::last_encoder_probe_supported_dynamic_range_for_codec[2]);
+  ASSERT_TRUE(video::last_encoder_probe_supported_dynamic_range_yuv444_for_codec[2]);
+
+  video::record_encoder_probe_results(second);
+
+  EXPECT_FALSE(video::last_encoder_probe_supported_ref_frames_invalidation);
+  for (std::size_t i = 0; i < 3; ++i) {
+    EXPECT_FALSE(video::last_encoder_probe_supported_yuv444_for_codec[i]) << i;
+    EXPECT_FALSE(video::last_encoder_probe_supported_dynamic_range_for_codec[i]) << i;
+    EXPECT_FALSE(video::last_encoder_probe_supported_dynamic_range_yuv444_for_codec[i]) << i;
+  }
+}
 
 #ifdef _WIN32
 TEST(AmfH264OptionsTest, CoderUsesConfiguredValue) {
@@ -380,4 +562,96 @@ TEST(SoftwareEncoderConversion, Bgr0AndNv12) {
   fallback_nv12_img.height = h;
   fallback_nv12_img.row_pitch = w;
   EXPECT_EQ(device.convert(fallback_nv12_img), 0);
+}
+
+/**
+ * @brief Fixture for the frame timestamp bookkeeping helpers.
+ */
+struct FrameTimestampQueueTest: testing::Test {
+  /**
+   * @brief Produce a distinct timestamp for a frame number.
+   *
+   * @param frame_nr Frame number to derive the timestamp from.
+   * @return Timestamp unique to the frame number.
+   */
+  static std::chrono::steady_clock::time_point ts(int64_t frame_nr) {
+    return std::chrono::steady_clock::time_point {std::chrono::milliseconds {frame_nr}};
+  }
+
+  video::frame_timestamp_queue_t queue;
+};
+
+TEST_F(FrameTimestampQueueTest, MatchesInOrder) {
+  for (int64_t frame = 1; frame <= 4; ++frame) {
+    video::remember_frame_timestamp(queue, frame, ts(frame));
+    EXPECT_EQ(ts(frame), video::match_frame_timestamp(queue, frame));
+  }
+  EXPECT_TRUE(queue.empty());
+}
+
+TEST_F(FrameTimestampQueueTest, MatchesDelayedPackets) {
+  // Encoders may deliver packets several frames behind submission.
+  video::remember_frame_timestamp(queue, 1, ts(1));
+  video::remember_frame_timestamp(queue, 2, ts(2));
+  video::remember_frame_timestamp(queue, 3, ts(3));
+
+  EXPECT_EQ(ts(1), video::match_frame_timestamp(queue, 1));
+
+  video::remember_frame_timestamp(queue, 4, ts(4));
+
+  EXPECT_EQ(ts(2), video::match_frame_timestamp(queue, 2));
+  EXPECT_EQ(ts(3), video::match_frame_timestamp(queue, 3));
+  EXPECT_EQ(ts(4), video::match_frame_timestamp(queue, 4));
+}
+
+TEST_F(FrameTimestampQueueTest, DiscardsDroppedPts) {
+  // Frames whose packets never surface must be discarded, and a stale pts
+  // must never be paired with another frame's timestamp.
+  video::remember_frame_timestamp(queue, 1, ts(1));
+  video::remember_frame_timestamp(queue, 2, ts(2));
+  video::remember_frame_timestamp(queue, 3, ts(3));
+
+  EXPECT_EQ(ts(3), video::match_frame_timestamp(queue, 3));
+  EXPECT_EQ(std::nullopt, video::match_frame_timestamp(queue, 1));
+  EXPECT_EQ(std::nullopt, video::match_frame_timestamp(queue, 2));
+}
+
+TEST_F(FrameTimestampQueueTest, IgnoresUnknownPts) {
+  video::remember_frame_timestamp(queue, 5, ts(5));
+
+  EXPECT_EQ(std::nullopt, video::match_frame_timestamp(queue, 6));
+  EXPECT_TRUE(queue.empty());
+}
+
+TEST_F(FrameTimestampQueueTest, SkipsMissingTimestamps) {
+  // Duplicate or synthesized frames carry no capture timestamp; they must not
+  // enqueue anything or disturb their neighbors.
+  video::remember_frame_timestamp(queue, 1, std::nullopt);
+  video::remember_frame_timestamp(queue, 2, ts(2));
+
+  EXPECT_EQ(std::nullopt, video::match_frame_timestamp(queue, 1));
+  EXPECT_EQ(ts(2), video::match_frame_timestamp(queue, 2));
+}
+
+TEST_F(FrameTimestampQueueTest, EvictsOldestBeyondCap) {
+  // A wedged encoder must not grow the queue without bound.
+  for (int64_t frame = 1; frame <= 200; ++frame) {
+    video::remember_frame_timestamp(queue, frame, ts(frame));
+  }
+
+  EXPECT_EQ(128u, queue.size());
+  EXPECT_EQ(std::nullopt, video::match_frame_timestamp(queue, 1));  // evicted
+  EXPECT_EQ(ts(73), video::match_frame_timestamp(queue, 73));  // oldest survivor
+  EXPECT_EQ(ts(200), video::match_frame_timestamp(queue, 200));
+}
+
+TEST_F(FrameTimestampQueueTest, EmptyQueueYieldsNothing) {
+  EXPECT_EQ(std::nullopt, video::match_frame_timestamp(queue, 1));
+}
+
+TEST_F(FrameTimestampQueueTest, ConsumesEntriesOnce) {
+  video::remember_frame_timestamp(queue, 1, ts(1));
+
+  EXPECT_EQ(ts(1), video::match_frame_timestamp(queue, 1));
+  EXPECT_EQ(std::nullopt, video::match_frame_timestamp(queue, 1));
 }

@@ -2,11 +2,18 @@
  * @file src/platform/linux/wayland.cpp
  * @brief Definitions for Wayland capture.
  */
+// standard includes
+#include <cerrno>
+#include <cstring>
+#include <limits>
+#include <mutex>
+
 // platform includes
 #include <drm_fourcc.h>
 #include <fcntl.h>
 #include <gbm.h>
 #include <poll.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wayland-util.h>
@@ -34,9 +41,66 @@ using namespace std::literals;
 
 namespace wl {
 
+  namespace {
+    const gbm_bo_accessors_t gbm_bo_accessors {
+      .get_plane_count = gbm_bo_get_plane_count,
+      .get_fd_for_plane = gbm_bo_get_fd_for_plane,
+      .get_stride_for_plane = gbm_bo_get_stride_for_plane,
+      .get_offset = gbm_bo_get_offset,
+      .get_modifier = gbm_bo_get_modifier,
+    };
+
+    int open_render_node(const char *path) {
+      return open(path, O_RDWR | O_CLOEXEC);
+    }
+
+    const gbm_device_accessors_t gbm_device_accessors {
+      .open_render_node = open_render_node,
+      .create_device = gbm_create_device,
+      .destroy_device = gbm_device_destroy,
+    };
+  }  // namespace
+
+  gbm_device_t::~gbm_device_t() {
+    reset();
+  }
+
+  bool gbm_device_t::init(const std::string &render_path, const gbm_device_accessors_t &device_accessors) {
+    reset();
+    accessors = device_accessors;
+
+    drm_fd = device_accessors.open_render_node(render_path.c_str());
+    if (drm_fd < 0) {
+      BOOST_LOG(error) << "[wayland] Failed to open DRM render node: "sv << render_path;
+      return false;
+    }
+
+    device = device_accessors.create_device(drm_fd);
+    if (!device) {
+      BOOST_LOG(error) << "[wayland] Failed to create GBM device"sv;
+      reset();
+      return false;
+    }
+
+    return true;
+  }
+
+  void gbm_device_t::reset() {
+    if (device) {
+      accessors.destroy_device(device);
+      device = nullptr;
+    }
+
+    // gbm_device_destroy() does not close the descriptor the device was created from
+    if (drm_fd >= 0) {
+      close(drm_fd);
+      drm_fd = -1;
+    }
+  }
+
   // Helper to call C++ method from wayland C callback
   template<class T, class Method, Method m, class... Params>
-  static auto classCall(void *data, Params... params) -> decltype(((*reinterpret_cast<T *>(data)).*m)(params...)) {
+  static auto classCall(void *data, Params... params) -> decltype(((*reinterpret_cast<T *>(data)).*m)(params...)) {  // NOSONAR(cpp:S5008): Wayland listener callbacks require a void pointer for user data.
     return ((*reinterpret_cast<T *>(data)).*m)(params...);
   }
 
@@ -117,10 +181,10 @@ namespace wl {
   monitor_t::monitor_t(wl_output *output):
       output {output},
       wl_listener {
-        &CLASS_CALL(monitor_t, wl_geometry),
-        &CLASS_CALL(monitor_t, wl_mode),
-        &CLASS_CALL(monitor_t, wl_done),
-        &CLASS_CALL(monitor_t, wl_scale),
+        .geometry = &CLASS_CALL(monitor_t, wl_geometry),
+        .mode = &CLASS_CALL(monitor_t, wl_mode),
+        .done = &CLASS_CALL(monitor_t, wl_done),
+        .scale = &CLASS_CALL(monitor_t, wl_scale),
       },
       xdg_listener {
         &CLASS_CALL(monitor_t, xdg_position),
@@ -171,6 +235,7 @@ namespace wl {
 
     viewport.width = width;
     viewport.height = height;
+    refresh_mhz = refresh;
   }
 
   void monitor_t::listen(zxdg_output_manager_v1 *output_manager) {
@@ -199,44 +264,51 @@ namespace wl {
   }
 
   void interface_t::dmabuf_format(zwp_linux_dmabuf_v1 *zwp_linux_dmabuf, uint32_t format) {
+    // Modifier events supply the explicit format/modifier pairs used for allocation.
   }
 
   void interface_t::dmabuf_modifier(zwp_linux_dmabuf_v1 *zwp_linux_dmabuf, uint32_t format, uint32_t modifier_hi, uint32_t modifier_lo) {
-    uint64_t modifier = ((uint64_t) modifier_hi << 32) | modifier_lo;
-    supported_modifiers[format].push_back(modifier);
+    const auto modifier = (static_cast<std::uint64_t>(modifier_hi) << 32) | modifier_lo;
+    if (modifier != DRM_FORMAT_MOD_INVALID) {
+      supported_modifiers[format].push_back(modifier);
+    }
   }
 
   void interface_t::add_interface(
     wl_registry *registry,
     std::uint32_t id,
-    const char *interface,
+    const char *interface_name,
     std::uint32_t version
   ) {
-    BOOST_LOG(debug) << "[wayland] Available interface: "sv << interface << '(' << id << ") version "sv << version;
+    BOOST_LOG(debug) << "[wayland] Available interface: "sv << interface_name << '(' << id << ") version "sv << version;
 
-    if (!std::strcmp(interface, wl_output_interface.name)) {
-      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
+    if (!std::strcmp(interface_name, wl_output_interface.name)) {
+      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface_name << '(' << id << ") version "sv << version;
       monitors.emplace_back(
         std::make_unique<monitor_t>(
           (wl_output *) wl_registry_bind(registry, id, &wl_output_interface, 2)
         )
       );
-    } else if (!std::strcmp(interface, zxdg_output_manager_v1_interface.name)) {
-      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
+    } else if (!std::strcmp(interface_name, zxdg_output_manager_v1_interface.name)) {
+      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface_name << '(' << id << ") version "sv << version;
       output_manager = (zxdg_output_manager_v1 *) wl_registry_bind(registry, id, &zxdg_output_manager_v1_interface, version);
 
-      this->interface[XDG_OUTPUT] = true;
-    } else if (!std::strcmp(interface, zwlr_screencopy_manager_v1_interface.name)) {
-      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      interface[XDG_OUTPUT] = true;
+    } else if (!std::strcmp(interface_name, zwlr_screencopy_manager_v1_interface.name)) {
+      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface_name << '(' << id << ") version "sv << version;
       screencopy_manager = (zwlr_screencopy_manager_v1 *) wl_registry_bind(registry, id, &zwlr_screencopy_manager_v1_interface, version);
+      screencopy_version = version;
 
-      this->interface[WLR_EXPORT_DMABUF] = true;
-    } else if (!std::strcmp(interface, zwp_linux_dmabuf_v1_interface.name)) {
-      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      interface[WLR_EXPORT_DMABUF] = true;
+    } else if (!std::strcmp(interface_name, zwp_linux_dmabuf_v1_interface.name)) {
+      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface_name << '(' << id << ") version "sv << version;
       dmabuf_interface = (zwp_linux_dmabuf_v1 *) wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, std::min(version, 3u));
       zwp_linux_dmabuf_v1_add_listener(dmabuf_interface, &dmabuf_listener, this);
 
-      this->interface[LINUX_DMABUF] = true;
+      interface[LINUX_DMABUF] = true;
+    } else if (!std::strcmp(interface_name, wl_shm_interface.name)) {
+      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface_name << '(' << id << ") version "sv << version;
+      shm_interface = (wl_shm *) wl_registry_bind(registry, id, &wl_shm_interface, 1);
     }
   }
 
@@ -246,25 +318,11 @@ namespace wl {
 
   // Initialize GBM
   bool dmabuf_t::init_gbm() {
-    if (gbm_device) {
+    if (gbm) {
       return true;
     }
 
-    auto render_path = platf::resolve_render_device();
-    int drm_fd = open(render_path.c_str(), O_RDWR);
-    if (drm_fd < 0) {
-      BOOST_LOG(error) << "[wayland] Failed to open DRM render node: "sv << render_path;
-      return false;
-    }
-
-    gbm_device = gbm_create_device(drm_fd);
-    if (!gbm_device) {
-      close(drm_fd);
-      BOOST_LOG(error) << "[wayland] Failed to create GBM device"sv;
-      return false;
-    }
-
-    return true;
+    return gbm.init(platf::resolve_render_device(), gbm_device_accessors);
   }
 
   // Cleanup GBM
@@ -280,9 +338,192 @@ namespace wl {
     }
   }
 
+  std::map<std::uint32_t, std::vector<std::uint64_t>> intersect_modifiers(
+    const std::map<std::uint32_t, std::vector<std::uint64_t>> &compositor_modifiers,
+    const std::map<std::uint32_t, std::vector<std::uint64_t>> &encoder_modifiers
+  ) {
+    std::map<std::uint32_t, std::vector<std::uint64_t>> result;
+
+    for (const auto &[format, comp_mods] : compositor_modifiers) {
+      auto it = encoder_modifiers.find(format);
+      if (it == encoder_modifiers.end()) {
+        continue;
+      }
+
+      const auto &enc_mods = it->second;
+      std::vector<std::uint64_t> common;
+
+      for (auto mod : comp_mods) {
+        if (std::find(enc_mods.begin(), enc_mods.end(), mod) != enc_mods.end()) {
+          common.push_back(mod);
+        }
+      }
+
+      if (!common.empty()) {
+        BOOST_LOG(debug) << "[wayland] Format 0x"sv << std::hex << format << std::dec
+                         << " has "sv << common.size() << " common modifiers"sv;
+        result[format] = std::move(common);
+      }
+    }
+
+    return result;
+  }
+
+  bool should_attempt_linear_copy(bool prefer_linear_copy, const std::vector<std::uint64_t> &modifiers) {
+    return prefer_linear_copy && std::find(modifiers.begin(), modifiers.end(), DRM_FORMAT_MOD_LINEAR) != modifiers.end();
+  }
+
+  const std::vector<std::uint64_t> *find_advertised_modifiers(const std::map<std::uint32_t, std::vector<std::uint64_t>> *modifiers, std::uint32_t format) {
+    if (modifiers) {
+      if (const auto it = modifiers->find(format); it != modifiers->end() && !it->second.empty()) {
+        return &it->second;
+      }
+    }
+    return nullptr;
+  }
+
+  // Destroy the per-frame SHM Wayland objects, keeping the memfd mapping
+  void dmabuf_t::cleanup_shm() {
+    if (shm.buffer) {
+      wl_buffer_destroy(shm.buffer);
+      shm.buffer = nullptr;
+    }
+
+    if (shm.pool) {
+      wl_shm_pool_destroy(shm.pool);
+      shm.pool = nullptr;
+    }
+  }
+
+  // Release the memfd mapping as well
+  void dmabuf_t::destroy_shm() {
+    cleanup_shm();
+
+    if (shm.mapping && shm.size > 0) {
+      munmap(shm.mapping, shm.size);
+      shm.mapping = nullptr;
+      shm.size = 0;
+    }
+
+    if (shm.fd >= 0) {
+      close(shm.fd);
+      shm.fd = -1;
+    }
+  }
+
+  bool dmabuf_t::init_shm(std::size_t size) {
+    if (size == shm.size) {
+      return true;
+    }
+
+    destroy_shm();
+
+    shm.fd = memfd_create("sunshine-shm", 0);
+    if (shm.fd < 0) {
+      BOOST_LOG(error) << "[wayland] memfd_create failed: "sv << strerror(errno);
+      return false;
+    }
+
+    if (ftruncate(shm.fd, size) < 0) {
+      BOOST_LOG(error) << "[wayland] ftruncate failed: "sv << strerror(errno);
+      close(shm.fd);
+      shm.fd = -1;
+      return false;
+    }
+
+    shm.mapping = static_cast<std::uint8_t *>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm.fd, 0));
+    if (shm.mapping == MAP_FAILED) {
+      BOOST_LOG(error) << "[wayland] mmap failed: "sv << strerror(errno);
+      shm.mapping = nullptr;
+      close(shm.fd);
+      shm.fd = -1;
+      return false;
+    }
+
+    shm.size = size;
+    return true;
+  }
+
+  std::optional<std::size_t> shm_buffer_size(std::uint32_t format, std::uint32_t width, std::uint32_t height, std::uint32_t stride) {
+    std::uint32_t bpp;
+    switch (format) {
+      case WL_SHM_FORMAT_XRGB8888:
+      case WL_SHM_FORMAT_ARGB8888:
+      case WL_SHM_FORMAT_XBGR8888:
+      case WL_SHM_FORMAT_ABGR8888:
+        bpp = 4;
+        break;
+      case WL_SHM_FORMAT_RGB888:
+      case WL_SHM_FORMAT_BGR888:
+        bpp = 3;
+        break;
+      default:
+        return std::nullopt;
+    }
+
+    if (constexpr auto limit = std::numeric_limits<std::int32_t>::max(); !width || !height || !stride || width > limit || height > limit || stride > limit || width > stride / bpp || height > limit / stride) {
+      return std::nullopt;
+    }
+
+    return static_cast<std::size_t>(stride) * height;
+  }
+
+  // SHM creation helper
+  void dmabuf_t::create_and_copy_shm(zwlr_screencopy_frame_v1 *frame) {
+    auto needed = shm_buffer_size(shm_info.format, shm_info.width, shm_info.height, shm_info.stride);
+
+    if (!needed || !init_shm(*needed)) {
+      zwlr_screencopy_frame_v1_destroy(frame);
+      status = REINIT;
+      return;
+    }
+
+    // The compositor may hold a reference to the previous buffer, so hand it a fresh one
+    cleanup_shm();
+
+    shm.pool = wl_shm_create_pool(shm.interface, shm.fd, shm.size);
+    if (!shm.pool) {
+      BOOST_LOG(error) << "[wayland] Failed to create SHM pool"sv;
+      zwlr_screencopy_frame_v1_destroy(frame);
+      status = REINIT;
+      return;
+    }
+
+    shm.buffer = wl_shm_pool_create_buffer(
+      shm.pool,
+      0,
+      shm_info.width,
+      shm_info.height,
+      shm_info.stride,
+      shm_info.format
+    );
+    if (!shm.buffer) {
+      BOOST_LOG(error) << "[wayland] Failed to create SHM buffer"sv;
+      cleanup_shm();
+      zwlr_screencopy_frame_v1_destroy(frame);
+      status = REINIT;
+      return;
+    }
+
+    shm.active = true;
+
+    static std::once_flag shm_format_log_flag;
+    std::call_once(shm_format_log_flag, [&] {
+      BOOST_LOG(info) << "[wayland] SHM capture: "sv
+                      << shm_info.width << "x"sv << shm_info.height
+                      << " stride="sv << shm_info.stride
+                      << " format=0x"sv << std::hex << shm_info.format << std::dec;
+    });
+
+    if (with_damage) {
+      zwlr_screencopy_frame_v1_copy_with_damage(frame, shm.buffer);
+    } else {
+      zwlr_screencopy_frame_v1_copy(frame, shm.buffer);
+    }
+    pending_copy = frame;
+  }
+
   dmabuf_t::dmabuf_t():
-      status {READY},
-      frames {},
       current_frame {&frames[0]},
       listener {
         &CLASS_CALL(dmabuf_t, buffer),
@@ -298,13 +539,20 @@ namespace wl {
   // Start capture
   void dmabuf_t::listen(
     zwlr_screencopy_manager_v1 *screencopy_manager,
-    zwp_linux_dmabuf_v1 *dmabuf_interface,
-    const std::map<std::uint32_t, std::vector<std::uint64_t>> *supported_modifiers,
+    zwp_linux_dmabuf_v1 *dmabuf_interface_in,
+    const std::map<std::uint32_t, std::vector<std::uint64_t>> *compositor_formats_in,
+    wl_shm *shm_interface_in,
     wl_output *output,
-    bool blend_cursor
+    bool blend_cursor,
+    const std::map<std::uint32_t, std::vector<std::uint64_t>> *encoder_formats_in,
+    bool prefer_linear_copy_in
   ) {
-    this->dmabuf_interface = dmabuf_interface;
-    this->supported_modifiers = supported_modifiers;
+    capture_context = {screencopy_manager, output, blend_cursor};
+    dmabuf_interface = dmabuf_interface_in;
+    supported_modifiers = compositor_formats_in;
+    encoder_modifiers = encoder_formats_in;
+    prefer_linear_copy = prefer_linear_copy_in;
+    shm.interface = shm_interface_in;
     // Reset state
     shm_info.supported = false;
     dmabuf_info.supported = false;
@@ -327,16 +575,13 @@ namespace wl {
 
   dmabuf_t::~dmabuf_t() {
     cleanup_gbm();
+    destroy_shm();
 
     for (auto &frame : frames) {
       frame.destroy();
     }
 
-    if (gbm_device) {
-      // We should close the DRM FD, but it's owned by GBM
-      gbm_device_destroy(gbm_device);
-      gbm_device = nullptr;
-    }
+    gbm.reset();
   }
 
   // Buffer format callback
@@ -373,84 +618,130 @@ namespace wl {
     BOOST_LOG(verbose) << "Frame flags: "sv << flags << (y_invert ? " (y_invert)" : "");
   }
 
-  // DMA-BUF creation helper
-  void dmabuf_t::create_and_copy_dmabuf(zwlr_screencopy_frame_v1 *frame) {
-    if (!init_gbm()) {
-      BOOST_LOG(error) << "Failed to initialize GBM"sv;
-      zwlr_screencopy_frame_v1_destroy(frame);
-      status = REINIT;
-      return;
+  std::optional<std::uint32_t> export_gbm_bo_planes(gbm_bo *bo, frame_t &frame, const gbm_bo_accessors_t &accessors) {
+    frame.destroy();
+
+    const auto plane_count = accessors.get_plane_count(bo);
+    if (plane_count <= 0 || plane_count > static_cast<int>(std::size(frame.sd.fds))) {
+      BOOST_LOG(error) << "[wayland] GBM buffer has unsupported plane count ["sv << plane_count << ']';
+      return std::nullopt;
     }
 
-    // Create GBM buffer
-    if (supported_modifiers) {
-      auto it = supported_modifiers->find(dmabuf_info.format);
-      if (it != supported_modifiers->end() && !it->second.empty()) {
-        current_bo = gbm_bo_create_with_modifiers(gbm_device, dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, it->second.data(), it->second.size());
+    frame.sd.modifier = accessors.get_modifier(bo);
+    for (auto plane = 0; plane < plane_count; ++plane) {
+      frame.sd.fds[plane] = accessors.get_fd_for_plane(bo, plane);
+      if (frame.sd.fds[plane] < 0) {
+        BOOST_LOG(error) << "[wayland] Failed to export DMA-BUF plane ["sv << plane << ']';
+        frame.destroy();
+        return std::nullopt;
+      }
+
+      frame.sd.pitches[plane] = accessors.get_stride_for_plane(bo, plane);
+      frame.sd.offsets[plane] = accessors.get_offset(bo, plane);
+    }
+
+    return static_cast<std::uint32_t>(plane_count);
+  }
+
+  // DMA-BUF creation helper — returns false when the caller should fall back to SHM
+  bool dmabuf_t::create_and_copy_dmabuf(zwlr_screencopy_frame_v1 *frame) {
+    if (!init_gbm()) {
+      BOOST_LOG(error) << "Failed to initialize GBM"sv;
+      return false;
+    }
+
+    // Create GBM buffer - prefer encoder-intersected modifiers when available
+    const std::map<std::uint32_t, std::vector<std::uint64_t>> *modifiers_to_use = encoder_modifiers ? encoder_modifiers : supported_modifiers;
+    if (const auto *advertised = find_advertised_modifiers(modifiers_to_use, dmabuf_info.format); advertised) {
+      if (should_attempt_linear_copy(prefer_linear_copy, *advertised)) {
+        // Cross-GPU encode (e.g. NVENC on a headless NVIDIA GPU while the compositor
+        // renders on AMD/Intel) cannot import vendor-tiled modifiers, so request a
+        // linear buffer the encoder is guaranteed to import instead. Note: no
+        // GBM_BO_USE_LINEAR here, Mesa rejects that flag with modifiers2.
+        constexpr std::uint64_t linear_modifier = DRM_FORMAT_MOD_LINEAR;
+        current_bo = gbm_bo_create_with_modifiers2(gbm.get(), dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, &linear_modifier, 1, GBM_BO_USE_RENDERING);
+        if (!current_bo) {
+          BOOST_LOG(debug) << "Linear screencopy buffer unavailable, falling back to compositor modifiers"sv;
+        }
+      }
+      if (!current_bo) {
+        current_bo = gbm_bo_create_with_modifiers2(gbm.get(), dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, advertised->data(), advertised->size(), GBM_BO_USE_RENDERING);
       }
     }
 
     if (!current_bo) {
-      current_bo = gbm_bo_create(gbm_device, dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, GBM_BO_USE_RENDERING);
+      current_bo = gbm_bo_create(gbm.get(), dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, GBM_BO_USE_RENDERING);
     }
 
     if (!current_bo) {
       BOOST_LOG(error) << "Failed to create GBM buffer"sv;
-      zwlr_screencopy_frame_v1_destroy(frame);
-      status = REINIT;
-      return;
+      return false;
     }
 
-    // Get buffer info
-    int fd = gbm_bo_get_fd(current_bo);
-    if (fd < 0) {
-      BOOST_LOG(error) << "Failed to get buffer FD"sv;
+    // Export every memory plane into the surface descriptor
+    auto next_frame = get_next_frame();
+    const auto plane_count = export_gbm_bo_planes(current_bo, *next_frame, gbm_bo_accessors);
+    if (!plane_count.has_value()) {
       gbm_bo_destroy(current_bo);
       current_bo = nullptr;
-      zwlr_screencopy_frame_v1_destroy(frame);
-      status = REINIT;
-      return;
+      return false;
     }
-
-    uint32_t stride = gbm_bo_get_stride(current_bo);
-    uint64_t modifier = gbm_bo_get_modifier(current_bo);
-
-    // Store in surface descriptor for later use
-    auto next_frame = get_next_frame();
-    next_frame->sd.fds[0] = fd;
-    next_frame->sd.pitches[0] = stride;
-    next_frame->sd.offsets[0] = 0;
-    next_frame->sd.modifier = modifier;
 
     // Create linux-dmabuf buffer
     auto params = zwp_linux_dmabuf_v1_create_params(dmabuf_interface);
-    zwp_linux_buffer_params_v1_add(params, fd, 0, 0, stride, modifier >> 32, modifier & 0xffffffff);
+    for (std::uint32_t plane = 0; plane < *plane_count; ++plane) {
+      zwp_linux_buffer_params_v1_add(
+        params,
+        next_frame->sd.fds[plane],
+        plane,
+        next_frame->sd.offsets[plane],
+        next_frame->sd.pitches[plane],
+        next_frame->sd.modifier >> 32,
+        next_frame->sd.modifier & 0xffffffff
+      );
+    }
 
     // Add listener for buffer creation
     zwp_linux_buffer_params_v1_add_listener(params, &params_listener, frame);
 
     // Create Wayland buffer (async - callback will handle copy)
     zwp_linux_buffer_params_v1_create(params, dmabuf_info.width, dmabuf_info.height, dmabuf_info.format, 0);
+
+    return true;
   }
 
   // Buffer done callback - time to create buffer
   void dmabuf_t::buffer_done(zwlr_screencopy_frame_v1 *frame) {
     auto next_frame = get_next_frame();
+    shm.active = false;
 
     // Prefer DMA-BUF if supported
-    if (dmabuf_info.supported && dmabuf_interface) {
+    if (dmabuf_info.supported && dmabuf_interface && allow_dmabuf && !gbm_failed) {
       // Store format info first
       next_frame->sd.fourcc = dmabuf_info.format;
       next_frame->sd.width = dmabuf_info.width;
       next_frame->sd.height = dmabuf_info.height;
 
       // Create and start copy
-      create_and_copy_dmabuf(frame);
-    } else if (shm_info.supported) {
-      // SHM fallback would go here
-      BOOST_LOG(warning) << "[wayland] SHM capture not implemented"sv;
+      if (create_and_copy_dmabuf(frame)) {
+        return;
+      }
+
+      // GBM allocation is not going to start working later on, so stop retrying it
+      gbm_failed = true;
+      cleanup_gbm();
+
+      if (shm_info.supported && shm.interface) {
+        BOOST_LOG(warning) << "[wayland] DMA-BUF capture failed, falling back to SHM"sv;
+        create_and_copy_shm(frame);
+        return;
+      }
+
+      BOOST_LOG(error) << "[wayland] DMA-BUF capture failed and no SHM fallback is available"sv;
       zwlr_screencopy_frame_v1_destroy(frame);
       status = REINIT;
+    } else if (shm_info.supported && shm.interface) {
+      create_and_copy_shm(frame);
     } else {
       BOOST_LOG(error) << "[wayland] No supported buffer types"sv;
       zwlr_screencopy_frame_v1_destroy(frame);
@@ -472,7 +763,12 @@ namespace wl {
 
     // Start the actual copy
     zwp_linux_buffer_params_v1_destroy(params);
-    zwlr_screencopy_frame_v1_copy(frame, buffer);
+    if (self->with_damage) {
+      zwlr_screencopy_frame_v1_copy_with_damage(frame, buffer);
+    } else {
+      zwlr_screencopy_frame_v1_copy(frame, buffer);
+    }
+    self->pending_copy = frame;
   }
 
   // Buffer params failed callback
@@ -485,8 +781,17 @@ namespace wl {
 
     BOOST_LOG(error) << "[wayland] Failed to create buffer from params"sv;
     self->cleanup_gbm();
+    self->get_next_frame()->destroy();
+
+    // The compositor rejected our DMA-BUF; retrying it would loop, so take the SHM path
+    self->gbm_failed = true;
 
     zwp_linux_buffer_params_v1_destroy(params);
+    if (self->shm_info.supported && self->shm.interface) {
+      self->create_and_copy_shm(frame);
+      return;
+    }
+
     zwlr_screencopy_frame_v1_destroy(frame);
     self->status = REINIT;
   }
@@ -508,15 +813,34 @@ namespace wl {
       std::chrono::duration_cast<std::chrono::steady_clock::duration>(ready_ts)
     };
 
-    // Keep the GBM buffer alive but destroy the Wayland objects
-    if (current_wl_buffer) {
-      wl_buffer_destroy(current_wl_buffer);
-      current_wl_buffer = nullptr;
+    if (shm.active) {
+      // wlr_t::snapshot() checks these against the configured resolution
+      current_frame->sd.width = shm_info.width;
+      current_frame->sd.height = shm_info.height;
+
+      // Copy out — the compositor writes the next frame into the same mapping
+      const auto *src = shm.mapping;
+      current_frame->shm_data.assign(src, src + static_cast<std::size_t>(shm_info.stride) * shm_info.height);
+      current_frame->shm_stride = shm_info.stride;
+      current_frame->shm_format = shm_info.format;
+      current_frame->is_shm = true;
+      current_frame->shm_y_invert = y_invert;
+
+      cleanup_shm();
+    } else {
+      current_frame->is_shm = false;
+
+      // Keep the GBM buffer alive but destroy the Wayland objects
+      if (current_wl_buffer) {
+        wl_buffer_destroy(current_wl_buffer);
+        current_wl_buffer = nullptr;
+      }
+
+      cleanup_gbm();
     }
 
-    cleanup_gbm();
-
     zwlr_screencopy_frame_v1_destroy(frame);
+    pending_copy = nullptr;
     status = READY;
   }
 
@@ -524,13 +848,43 @@ namespace wl {
   void dmabuf_t::failed(zwlr_screencopy_frame_v1 *frame) {
     BOOST_LOG(error) << "[wayland] Frame capture failed"sv;
 
+    const bool retry_shm = pending_copy == frame && current_wl_buffer && !shm.active && !gbm_failed && shm_info.supported && shm.interface;
+
     // Clean up resources
     cleanup_gbm();
+    cleanup_shm();
     auto next_frame = get_next_frame();
     next_frame->destroy();
 
     zwlr_screencopy_frame_v1_destroy(frame);
+    pending_copy = nullptr;
+    if (retry_shm) {
+      // A failed screencopy is terminal. Retry with a new request, immediately,
+      // so an unchanged output does not leave the SHM fallback waiting for damage.
+      gbm_failed = true;
+      with_damage = false;
+      BOOST_LOG(warning) << "[wayland] DMA-BUF copy failed, retrying capture with SHM"sv;
+      listen(capture_context.manager, dmabuf_interface, supported_modifiers, shm.interface, capture_context.output, capture_context.blend_cursor, encoder_modifiers, prefer_linear_copy);
+      return;
+    }
     status = REINIT;
+  }
+
+  bool dmabuf_t::cancel() {
+    if (!pending_copy) {
+      return false;
+    }
+
+    zwlr_screencopy_frame_v1_destroy(pending_copy);
+    pending_copy = nullptr;
+
+    // Same as a failed copy: the buffer the compositor was to fill is not needed anymore
+    cleanup_gbm();
+    cleanup_shm();
+    get_next_frame()->destroy();
+
+    status = READY;
+    return true;
   }
 
   // Only called if using zwlr_screencopy_frame_v1_copy_with_damage()
@@ -540,7 +894,9 @@ namespace wl {
     std::uint32_t y,
     std::uint32_t width,
     std::uint32_t height
-  ) {};
+  ) {
+    // Capture and encoding consume the whole buffer, so no damage rectangles are tracked.
+  };
 
   void frame_t::destroy() {
     for (auto x = 0; x < 4; ++x) {
@@ -554,7 +910,7 @@ namespace wl {
 
   frame_t::frame_t() {
     // File descriptors aren't open
-    std::fill_n(sd.fds, 4, -1);
+    sd.fds.fill(-1);
   };
 
   /**

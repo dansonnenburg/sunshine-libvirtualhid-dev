@@ -13,8 +13,8 @@
  * that only compile on their own platform.
  *
  * These tests record keyboard output instead of delivering it, so they never type into the
- * machine running the suite. One test deliberately clears the recorder to prove the real
- * delivery path still reaches the virtual keyboard.
+ * machine running the suite. Tests that clear the recorder exercise the real delivery path
+ * through the platform adapter to a fake virtual keyboard, including F17/F18 volume remapping.
  */
 
 // test includes
@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <memory>
@@ -36,6 +37,17 @@
 #include "src/config.h"
 #include "src/input.h"
 #include "src/platform/virtualhid_input.h"
+
+namespace input {
+  /**
+   * @brief Execute one repeat callback directly for a deterministic keyboard test.
+   *
+   * @param key_code Client key code being repeated.
+   * @param flags Client packet flags.
+   * @param synthetic_modifiers Byte mask of synthetic modifiers around the repeated key.
+   */
+  void repeat_key(std::uint16_t key_code, std::uint8_t flags, std::byte synthetic_modifiers);
+}  // namespace input
 
 namespace {
   using namespace std::chrono_literals;
@@ -451,6 +463,35 @@ TEST_F(KeyboardPassthroughTest, ForwardsEveryUnmodifiedKeyUnchanged) {
   }
 }
 
+TEST_F(KeyboardPassthroughTest, PreservesExtendedEnterOnReleaseAndDisconnect) {
+  press(VKEY_RETURN);
+  release(VKEY_RETURN);
+  auto events = taken_events();
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_FALSE(events[0].extended);
+  EXPECT_FALSE(events[1].extended);
+
+  press(VKEY_RETURN, MODIFIER_EXTENDED | MODIFIER_SHIFT);
+  events = taken_events();
+  ASSERT_EQ(events.size(), 3U);
+  EXPECT_FALSE(events[0].extended);
+  EXPECT_TRUE(events[1].extended);
+  EXPECT_FALSE(events[2].extended);
+
+  // The bit may be absent on key-up; release the key as it was pressed.
+  release(VKEY_RETURN);
+  events = taken_events();
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_TRUE(events[0].extended);
+
+  press(VKEY_RETURN, MODIFIER_EXTENDED);
+  taken_events();
+  input::testing::release_held_keys();
+  events = taken_events();
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_TRUE(events[0].extended);
+}
+
 TEST_F(KeyboardPassthroughTest, CoversTheWholePrintableAsciiRange) {
   // Guard the table itself: every printable ASCII character must be reachable, exactly once.
   std::set<char> covered;
@@ -547,7 +588,7 @@ TEST_F(KeyboardPassthroughTest, InjectsSyntheticModifiersTheClientHoldsWithoutSe
     {MODIFIER_ALT, VKEY_MENU},
   }};
 
-  for (unsigned combination = 1; combination < (1u << injectable.size()); ++combination) {
+  for (unsigned combination = 0; combination < (1u << injectable.size()); ++combination) {
     std::vector<std::string> expected;
     unsigned claimed = 0;
     for (std::size_t index = 0; index < injectable.size(); ++index) {
@@ -579,6 +620,29 @@ TEST_F(KeyboardPassthroughTest, NeverSynthesizesTheMetaModifier) {
   press(VKEY_A, MODIFIER_META);
   release(VKEY_A, MODIFIER_META);
   EXPECT_EQ(taken(), (std::vector<std::string> {pressed(VKEY_A), released(VKEY_A)}));
+}
+
+TEST_F(KeyboardPassthroughTest, RepeatsByteMaskedModifiersAndStopsAfterStateIsCleared) {
+  config::input.key_repeat_period = 1h;
+  constexpr auto synthetic_modifiers = std::byte {MODIFIER_SHIFT} | std::byte {MODIFIER_CTRL} | std::byte {MODIFIER_ALT};
+  constexpr std::uint8_t flags = SS_KBE_FLAG_NON_NORMALIZED;
+  press(VKEY_A, std::to_integer<unsigned>(synthetic_modifiers) | MODIFIER_EXTENDED, flags);
+  taken_events();
+
+  input::repeat_key(VKEY_A, flags, synthetic_modifiers);
+  const auto events = taken_events();
+  ASSERT_EQ(events.size(), 7U);
+  const std::array<std::uint16_t, 7> expected_keys {VKEY_SHIFT, VKEY_CONTROL, VKEY_MENU, VKEY_A, VKEY_SHIFT, VKEY_CONTROL, VKEY_MENU};
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    EXPECT_EQ(events[index].key_code, expected_keys[index]);
+    EXPECT_EQ(events[index].flags, flags);
+    EXPECT_EQ(events[index].release, index > 3);
+  }
+  EXPECT_TRUE(events[3].extended);
+
+  input::testing::reset_keyboard_state();
+  input::repeat_key(VKEY_A, flags, synthetic_modifiers);
+  EXPECT_TRUE(taken_events().empty());
 }
 
 TEST_F(KeyboardPassthroughTest, PropagatesPacketFlagsToEverySyntheticEvent) {
@@ -640,6 +704,29 @@ TEST_F(KeyboardPassthroughTest, EmitsRemappedKeycodesFromKeybindings) {
   press(VKEY_A);
   release(VKEY_A);
   EXPECT_EQ(taken(), (std::vector<std::string> {pressed(VKEY_A), released(VKEY_A)}));
+}
+
+TEST_F(KeyboardPassthroughTest, RemapsFunctionKeysToVolumeKeysThroughThePlatformAdapter) {
+  // Issue #4981: F17/F18 must reach the backend as volume keys, with no client extended bit.
+  config::input.keybindings = {{0x80, 0xAE}, {0x81, 0xAF}};
+  input::testing::set_keyboard_sink({});
+
+  for (const auto flags : {0U, static_cast<unsigned>(SS_KBE_FLAG_NON_NORMALIZED)}) {
+    for (const auto &[client, host] : config::input.keybindings) {
+      SCOPED_TRACE(hex(client));
+      SCOPED_TRACE(flags);
+      const auto prior_count = fake_keyboard().submit_count();
+      press(client, 0, flags);
+      auto event = fake_keyboard().last_submitted_event();
+      EXPECT_EQ(event.key_code, host);
+      EXPECT_TRUE(event.pressed);
+      release(client, 0, flags);
+      event = fake_keyboard().last_submitted_event();
+      EXPECT_EQ(event.key_code, host);
+      EXPECT_FALSE(event.pressed);
+      EXPECT_EQ(fake_keyboard().submit_count(), prior_count + 2U);
+    }
+  }
 }
 
 TEST_F(KeyboardPassthroughTest, DoesNotInjectSyntheticAltWhenAltIsRemappedToMeta) {
@@ -902,6 +989,66 @@ TEST_F(KeyboardPassthroughTest, ReleasesTheRemappedHostKeyWhenTheClientDisconnec
   // key_press is keyed on the unmapped 0xA4, so releasing that would leave the host holding
   // the remapped key down forever.
   EXPECT_EQ(taken(), (std::vector<std::string> {released(VKEY_LWIN)}));
+}
+
+TEST_F(KeyboardPassthroughTest, ReleasesHeldEditingKeysWhenClientDisconnects) {
+  constexpr unsigned non_normalized = 0x01;  // SS_KBE_FLAG_NON_NORMALIZED
+
+  struct editing_key_case_t {
+    std::uint16_t client_key;  ///< Keycode sent by the client.
+    std::uint16_t host_key;  ///< Canonical keycode emitted toward the platform.
+  };
+
+  constexpr std::array<editing_key_case_t, 8> cases {{
+    {0x7A, 0x0100},  // SDL scancode Undo
+    {0x7B, 0x0101},  // SDL scancode Cut
+    {0x7C, 0x0102},  // SDL scancode Copy
+    {0x7D, 0x0103},  // SDL scancode Paste
+    {0x0100, 0x0100},  // Dedicated Undo
+    {0x0101, 0x0101},  // Dedicated Cut
+    {0x0102, 0x0102},  // Dedicated Copy
+    {0x0103, 0x0103},  // Dedicated Paste
+  }};
+
+  for (const auto &editing_key : cases) {
+    SCOPED_TRACE(hex(editing_key.client_key));
+
+    press(editing_key.client_key, 0, non_normalized);
+    EXPECT_EQ(taken(), (std::vector<std::string> {pressed(editing_key.host_key)}));
+
+    input::testing::release_held_keys();
+
+    // The disconnect cleanup must release the full 16-bit code. Masking it to the low byte
+    // would release 0x03 instead of 0x0103, leaving the host holding the key down.
+    const auto events = taken_events();
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].key_code, editing_key.host_key);
+    EXPECT_TRUE(events[0].release);
+    EXPECT_EQ(events[0].flags, non_normalized);
+  }
+}
+
+TEST_F(KeyboardPassthroughTest, ReleasesTheRemappedHostKeyForHeldEditingKeysWhenClientDisconnects) {
+  constexpr unsigned non_normalized = 0x01;  // SS_KBE_FLAG_NON_NORMALIZED
+  config::input.keybindings = {{0x0103, VKEY_F1}, {0x0100, VKEY_F1 + 1}};
+
+  // A dedicated keycode and a scancode alias both resolve to a canonical code before remapping.
+  press(0x0103, 0, non_normalized);
+  press(0x7A, 0, non_normalized);
+  auto pressed_keys = taken();
+  std::ranges::sort(pressed_keys);
+  std::vector expected_pressed {pressed(VKEY_F1), pressed(VKEY_F1 + 1)};
+  std::ranges::sort(expected_pressed);
+  EXPECT_EQ(pressed_keys, expected_pressed);
+
+  input::testing::release_held_keys();
+
+  // key_press is an unordered_map, so the release order is unspecified.
+  auto released_keys = taken();
+  std::ranges::sort(released_keys);
+  std::vector expected_released {released(VKEY_F1), released(VKEY_F1 + 1)};
+  std::ranges::sort(expected_released);
+  EXPECT_EQ(released_keys, expected_released);
 }
 
 TEST_F(KeyboardPassthroughTest, ReleasesTheRemappedRightAltForKeyRightaltToKeyWin) {

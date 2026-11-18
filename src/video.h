@@ -6,7 +6,11 @@
 
 // standard includes
 #include <chrono>
+#include <deque>
+#include <optional>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 // local includes
 #include "input.h"
@@ -20,6 +24,14 @@ extern "C" {
 }
 
 struct AVPacket;
+
+namespace display_device {
+  struct EnumeratedDevice;
+}
+
+namespace stream {
+  struct session_t;
+}
 
 namespace video {
 
@@ -40,6 +52,15 @@ namespace video {
     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
   };
+
+  /**
+   * @brief Describe the streamed display, desktop bounds, and client letterboxing for absolute input.
+   *
+   * @param display Capture display supplying native output identity and geometry.
+   * @param config Client stream dimensions.
+   * @return Touch port forwarded from the video pipeline to input handling.
+   */
+  input::touch_port_t make_port(platf::display_t *display, const config_t &config);
 
   namespace amf {
 
@@ -63,6 +84,14 @@ namespace video {
    * @return FFmpeg H.264 profile applied to the codec context.
    */
   int select_h264_profile(std::string_view encoder_name, const config_t &config, int amd_coder);
+
+  /**
+   * @brief Decide whether encoder probing may proceed with the given display devices.
+   *
+   * @param devices Display devices currently enumerated by libdisplaydevice.
+   * @return True if there should be no issues with the probing, false if it must be prevented.
+   */
+  bool allow_encoder_probing(const std::vector<display_device::EnumeratedDevice> &devices);
 
   /**
    * @brief Map an FFmpeg hardware device type to Sunshine's memory type.
@@ -99,21 +128,21 @@ namespace video {
   void free_buffer(AVBufferRef *ref);
 
   /**
-   * @brief Owning pointer for an FFmpeg codec context.
+   * @brief Owning pointer for an FFmpeg codec context released with free_ctx().
    */
-  using avcodec_ctx_t = util::safe_ptr<AVCodecContext, free_ctx>;
+  using avcodec_ctx_t = util::safe_ptr<AVCodecContext, &free_ctx>;
   /**
-   * @brief Owning pointer for an FFmpeg frame.
+   * @brief Owning pointer for an FFmpeg frame released with free_frame().
    */
-  using avcodec_frame_t = util::safe_ptr<AVFrame, free_frame>;
+  using avcodec_frame_t = util::safe_ptr<AVFrame, &free_frame>;
   /**
-   * @brief Owning pointer for an FFmpeg buffer reference.
+   * @brief Owning pointer for an FFmpeg buffer reference released with free_buffer().
    */
-  using avcodec_buffer_t = util::safe_ptr<AVBufferRef, free_buffer>;
+  using avcodec_buffer_t = util::safe_ptr<AVBufferRef, &free_buffer>;
   /**
-   * @brief Owning pointer for an FFmpeg software-scaling context.
+   * @brief Owning pointer for an FFmpeg software-scaling context released with sws_freeContext().
    */
-  using sws_t = util::safe_ptr<SwsContext, sws_freeContext>;
+  using sws_t = util::safe_ptr<SwsContext, &sws_freeContext>;
   /**
    * @brief Shared event that transports captured images between capture and encode threads.
    */
@@ -186,6 +215,34 @@ namespace video {
     int offsetW;  ///< Offset w.
     int offsetH;  ///< Offset h.
   };
+
+  /**
+   * @brief Capture timestamps of in-flight frames keyed by pts, awaiting their encoded packets.
+   */
+  using frame_timestamp_queue_t = std::deque<std::pair<int64_t, std::chrono::steady_clock::time_point>>;
+
+  /**
+   * @brief Remember a submitted frame's capture timestamp until its encoded packet surfaces.
+   *
+   * Encoders may deliver packets one or more frames behind submission, so the timestamp is
+   * kept keyed by pts until the corresponding packet arrives. The queue is bounded: once
+   * 128 timestamps are outstanding, the oldest entry is evicted per insertion.
+   * @param timestamps Queue of outstanding capture timestamps.
+   * @param frame_nr Monotonic frame index assigned by the video pipeline, used as the frame pts.
+   * @param frame_timestamp Capture timestamp associated with the frame, when known.
+   */
+  void remember_frame_timestamp(frame_timestamp_queue_t &timestamps, int64_t frame_nr, const std::optional<std::chrono::steady_clock::time_point> &frame_timestamp);
+
+  /**
+   * @brief Match an encoded packet to the capture timestamp of the frame it encodes.
+   *
+   * Entries for older frames whose packets never surfaced (e.g. dropped by the encoder)
+   * are discarded; a packet is never paired with another frame's timestamp.
+   * @param timestamps Queue of outstanding capture timestamps.
+   * @param pts Presentation timestamp of the received packet.
+   * @return Capture timestamp of the packet's frame, when known.
+   */
+  std::optional<std::chrono::steady_clock::time_point> match_frame_timestamp(frame_timestamp_queue_t &timestamps, int64_t pts);
 
   /**
    * @brief Pixel formats supported by one encoder backend.
@@ -263,13 +320,41 @@ namespace video {
     /**
      * @brief Construct NVENC platform format mappings.
      *
+     * @param device_type Platform memory type.
+     * @param format_8bit Platform 8-bit pixel format.
+     * @param format_10bit Platform 10-bit pixel format.
+     * @param format_yuv444_8bit Platform 8-bit YUV444 pixel format.
+     * @param format_yuv444_10bit Platform 10-bit YUV444 pixel format.
+     */
+    encoder_platform_formats_nvenc(
+      const platf::mem_type_e &device_type,
+      const platf::pix_fmt_e &format_8bit,
+      const platf::pix_fmt_e &format_10bit,
+      const platf::pix_fmt_e &format_yuv444_8bit,
+      const platf::pix_fmt_e &format_yuv444_10bit
+    ) {
+      encoder_platform_formats_t::dev_type = device_type;
+      encoder_platform_formats_t::pix_fmt_8bit = format_8bit;
+      encoder_platform_formats_t::pix_fmt_10bit = format_10bit;
+      encoder_platform_formats_t::pix_fmt_yuv444_8bit = format_yuv444_8bit;
+      encoder_platform_formats_t::pix_fmt_yuv444_10bit = format_yuv444_10bit;
+    }
+  };
+
+  /**
+   * @brief Native VideoToolbox-specific pixel formats supported by a platform.
+   */
+  struct encoder_platform_formats_vt: encoder_platform_formats_t {
+    /**
+     * @brief Construct VideoToolbox platform format mappings.
+     *
      * @param dev_type Platform memory type.
      * @param pix_fmt_8bit Platform 8-bit pixel format.
      * @param pix_fmt_10bit Platform 10-bit pixel format.
      * @param pix_fmt_yuv444_8bit Platform 8-bit YUV444 pixel format.
      * @param pix_fmt_yuv444_10bit Platform 10-bit YUV444 pixel format.
      */
-    encoder_platform_formats_nvenc(
+    encoder_platform_formats_vt(
       const platf::mem_type_e &dev_type,
       const platf::pix_fmt_e &pix_fmt_8bit,
       const platf::pix_fmt_e &pix_fmt_10bit,
@@ -324,7 +409,9 @@ namespace video {
         _CONVERT(VUI_PARAMETERS);
         _CONVERT(MAX_FLAGS);
       }
-#undef _CONVERT
+#ifndef DOXYGEN
+  #undef _CONVERT
+#endif
 
       return {"unknown"};
     }
@@ -516,19 +603,19 @@ namespace video {
       KITTY_DEFAULT_CONSTR_MOVE(replace_t)
 
       /**
-       * @brief Store an encoded-byte replacement rule.
+       * @brief Copy the non-owning byte views for an encoded-byte replacement rule.
        *
        * @param old Byte sequence to replace in encoded packets.
        * @param _new Replacement byte sequence inserted into encoded packets.
        */
       replace_t(std::string_view old, std::string_view _new) noexcept:
-          old {std::move(old)},
-          _new {std::move(_new)} {
+          old {old},
+          _new {_new} {
       }
     };
 
     std::vector<replace_t> *replacements = nullptr;  ///< Optional encoded-byte substitutions applied before packetization.
-    void *channel_data = nullptr;  ///< Platform or protocol state carried with this packet.
+    stream::session_t *channel_data = nullptr;  ///< Stream session that receives this packet.
     bool after_ref_frame_invalidation = false;  ///< Whether the frame follows reference-frame invalidation.
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp associated with the frame.
   };
@@ -682,6 +769,8 @@ namespace video {
   extern int active_av1_mode;
   extern bool last_encoder_probe_supported_ref_frames_invalidation;
   extern std::array<bool, 3> last_encoder_probe_supported_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
+  extern std::array<bool, 3> last_encoder_probe_supported_dynamic_range_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
+  extern std::array<bool, 3> last_encoder_probe_supported_dynamic_range_yuv444_for_codec;  // 0 - H.264, 1 - HEVC, 2 - AV1
 
   /**
    * @brief Resolve a client-requested dynamic range against probed encoder capabilities.
@@ -693,16 +782,29 @@ namespace video {
   config_t resolve_dynamic_range(const encoder_t &encoder, config_t config);
 
   /**
+   * @brief Clear all published encoder probe results.
+   */
+  void reset_encoder_probe_results();
+
+  /**
+   * @brief Publish the capabilities of a probed encoder for client advertisement.
+   * @details A codec that did not pass its probe publishes no capabilities.
+   *
+   * @param encoder Encoder whose probed codec capabilities should be published.
+   */
+  void record_encoder_probe_results(const encoder_t &encoder);
+
+  /**
    * @brief Capture and encode video for a streaming session.
    *
    * @param mail Session mail bus.
    * @param config Client-requested video configuration, normalized before capture begins.
-   * @param channel_data Opaque channel data passed to packets.
+   * @param channel_data Stream session carried with each encoded packet.
    */
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    stream::session_t *channel_data
   );
 
   /**

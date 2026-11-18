@@ -33,7 +33,7 @@ You must combine the `SUNSHINE_VERSION` and `SUNSHINE_OS` to determine the tag t
 `<SUNSHINE_VERSION>-<SUNSHINE_OS>`. For example, `latest-ubuntu-24.04`.
 
 See all our available tags on [docker hub](https://hub.docker.com/r/lizardbyte/sunshine/tags) or
-[ghcr](https://github.com/LizardByte/Sunshine/pkgs/container/sunshine/versions) for more info.
+[ghcr](https://github.com/orgs/LizardByte/packages/container/package/sunshine) for more info.
 
 ## Where used
 This is a list of docker projects using Sunshine. Something missing? Let us know about it!
@@ -155,16 +155,3 @@ The architectures supported by these images are shown in the table below.
 | debian-bookworm | ✅            | ✅             |
 | ubuntu-22.04    | ✅            | ✅             |
 | ubuntu-24.04    | ✅            | ✅             |
-
-<div class="section_buttons">
-
-| Previous                       |                                                 Next |
-|:-------------------------------|-----------------------------------------------------:|
-| [Changelog](docs/changelog.md) | [Third-Party Packages](docs/third_party_packages.md) |
-
-</div>
-
-<details style="display: none;">
-  <summary></summary>
-  [TOC]
-</details>

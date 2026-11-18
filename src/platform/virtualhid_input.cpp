@@ -18,6 +18,9 @@
 #include <string_view>
 #include <utility>
 
+// lib includes
+#include <lizardbyte/common/env.h>
+
 // local includes
 #include "src/config.h"
 #include "src/logging.h"
@@ -78,6 +81,81 @@ namespace platf::virtualhid {
       if (!status.ok()) {
         BOOST_LOG(warning) << operation << ": "sv << status.message();
       }
+    }
+
+    /**
+     * @brief Forward one libvirtualhid diagnostic to Sunshine's logger.
+     *
+     * @param level libvirtualhid diagnostic severity.
+     * @param message Diagnostic message.
+     */
+    void log_virtualhid_message(lvh::LogLevel level, const std::string &message) {
+      switch (level) {
+        case lvh::LogLevel::debug:
+          BOOST_LOG(debug) << "[libvirtualhid] "sv << message;
+          break;
+        case lvh::LogLevel::info:
+          BOOST_LOG(info) << "[libvirtualhid] "sv << message;
+          break;
+        case lvh::LogLevel::warning:
+          BOOST_LOG(warning) << "[libvirtualhid] "sv << message;
+          break;
+        case lvh::LogLevel::error:
+          BOOST_LOG(error) << "[libvirtualhid] "sv << message;
+          break;
+      }
+    }
+
+    /**
+     * @brief Scope a libvirtualhid profile name to the target seat.
+     *
+     * @param profile Profile whose advertised device name is updated.
+     */
+    void apply_target_seat(lvh::DeviceProfile &profile) {
+      profile.name = device_name_for_seat(profile.name, target_seat());
+    }
+
+    /**
+     * @brief Compare two pointer viewports.
+     *
+     * @param left First viewport.
+     * @param right Second viewport.
+     * @return `true` when every bound matches.
+     */
+    bool pointer_viewports_equal(const lvh::PointerViewport &left, const lvh::PointerViewport &right) {
+      return left.offset_x == right.offset_x &&
+             left.offset_y == right.offset_y &&
+             left.width == right.width &&
+             left.height == right.height;
+    }
+
+    /**
+     * @brief Convert Sunshine absolute-input geometry to libvirtualhid bounds.
+     *
+     * @param touch_port Sunshine desktop and display geometry.
+     * @return Full virtual-desktop bounds followed by the streamed viewport.
+     */
+    std::pair<lvh::PointerViewport, lvh::PointerViewport> pointer_viewports(const touch_port_t &touch_port) {
+      const lvh::PointerViewport desktop {
+        .offset_x = touch_port.env_offset_x,
+        .offset_y = touch_port.env_offset_y,
+        .width = touch_port.width,
+        .height = touch_port.height,
+      };
+
+      if (touch_port.logical_width <= 0 || touch_port.logical_height <= 0) {
+        return {desktop, desktop};
+      }
+
+      return {
+        desktop,
+        {
+          .offset_x = touch_port.offset_x,
+          .offset_y = touch_port.offset_y,
+          .width = touch_port.logical_width,
+          .height = touch_port.logical_height,
+        },
+      };
     }
 
     float normalize_axis(std::int16_t value) {
@@ -301,13 +379,15 @@ namespace platf::virtualhid {
         .offset_y = touch_port.offset_y,
         .width = touch_port.width,
         .height = touch_port.height,
+        .output_name = touch_port.output_name,
       };
     }
 
-    lvh::KeyboardEvent keyboard_event(std::uint16_t modcode, bool release, std::uint8_t flags) {
+    lvh::KeyboardEvent keyboard_event(std::uint16_t modcode, bool release, std::uint8_t flags, bool extended) {
       lvh::KeyboardEvent event {
         .key_code = modcode,
         .pressed = !release,
+        .extended = extended,
       };
 
 #ifdef _WIN32
@@ -465,6 +545,7 @@ namespace platf::virtualhid {
 
     lvh::CreateKeyboardOptions options;
     options.profile = lvh::profiles::keyboard();
+    apply_target_seat(options.profile);
     options.stable_id = "sunshine-keyboard";
     auto created = runtime->create_keyboard(options);
     if (created) {
@@ -475,20 +556,38 @@ namespace platf::virtualhid {
   }
 
   void input_context_t::refresh_mouse() {
+    refresh_mouse({}, {});
+  }
+
+  void input_context_t::refresh_mouse(const lvh::PointerViewport &desktop, const lvh::PointerViewport &viewport) {
     mouse.reset();
+    mouse_desktop = desktop;
+    mouse_viewport = viewport;
     if (!runtime || !runtime->capabilities().supports_mouse) {
       return;
     }
 
     lvh::CreateMouseOptions options;
     options.profile = lvh::profiles::mouse();
+    apply_target_seat(options.profile);
     options.stable_id = "sunshine-mouse";
+    options.desktop = desktop;
+    options.viewport = viewport;
     auto created = runtime->create_mouse(options);
     if (created) {
       mouse = std::move(created.mouse);
     } else {
       log_failure("create libvirtualhid mouse"sv, created.status);
     }
+  }
+
+  void input_context_t::update_mouse_viewport(const touch_port_t &touch_port) {
+    const auto [desktop, viewport] = pointer_viewports(touch_port);
+    if (mouse && pointer_viewports_equal(mouse_desktop, desktop) && pointer_viewports_equal(mouse_viewport, viewport)) {
+      return;
+    }
+
+    refresh_mouse(desktop, viewport);
   }
 
   client_context_t::client_context_t(input_context_t &input):
@@ -501,6 +600,7 @@ namespace platf::virtualhid {
     if (capabilities.supports_touchscreen) {
       lvh::CreateTouchscreenOptions options;
       options.profile = lvh::profiles::touchscreen();
+      apply_target_seat(options.profile);
       options.stable_id = "sunshine-touchscreen";
       auto created = global->runtime->create_touchscreen(options);
       if (created) {
@@ -512,6 +612,7 @@ namespace platf::virtualhid {
     if (capabilities.supports_pen_tablet) {
       lvh::CreatePenTabletOptions options;
       options.profile = lvh::profiles::pen_tablet();
+      apply_target_seat(options.profile);
       options.stable_id = "sunshine-pen-tablet";
       auto created = global->runtime->create_pen_tablet(options);
       if (created) {
@@ -525,6 +626,7 @@ namespace platf::virtualhid {
   std::unique_ptr<lvh::Runtime> create_runtime(lvh::BackendKind backend) {
     lvh::RuntimeOptions options;
     options.backend = backend;
+    options.log_callback = log_virtualhid_message;
     return lvh::Runtime::create(options);
   }
 
@@ -542,14 +644,15 @@ namespace platf::virtualhid {
   std::vector<supported_gamepad_t> supported_gamepads(
     lvh::Runtime *runtime,
     const bool fallback_vigem_available,
-    const bool virtualhid_licensed
+    const bool virtualhid_licensed,
+    const bool require_license
   ) {
     if (!runtime) {
       return static_supported_gamepads();
     }
 
     const auto &capabilities = runtime->capabilities();
-    const auto license_valid = !capabilities.requires_installed_driver || virtualhid_licensed;
+    const auto license_valid = (!capabilities.requires_installed_driver && !require_license) || virtualhid_licensed;
     const auto libvirtualhid_available = capabilities.supports_gamepad && license_valid;
     std::string reason;
     if (!capabilities.supports_gamepad) {
@@ -582,7 +685,7 @@ namespace platf::virtualhid {
     const std::string_view gamepad_driver,
     const bool virtualhid_licensed
   ) {
-    return gamepad_driver != config::GAMEPAD_DRIVER_VIGEMBUS && capabilities.supports_gamepad &&
+    return gamepad_driver != config::GAMEPAD_DRIVER_VIGEMBUS && gamepad_driver != config::GAMEPAD_DRIVER_NONE && capabilities.supports_gamepad &&
            (!capabilities.requires_installed_driver || virtualhid_licensed);
   }
 
@@ -591,7 +694,7 @@ namespace platf::virtualhid {
     const bool virtualhid_selected,
     const std::string_view gamepad_driver
   ) {
-    if (gamepad_driver == config::GAMEPAD_DRIVER_VIRTUALHID) {
+    if (gamepad_driver == config::GAMEPAD_DRIVER_VIRTUALHID || gamepad_driver == config::GAMEPAD_DRIVER_NONE) {
       return false;
     }
     if (gamepad_driver == config::GAMEPAD_DRIVER_VIGEMBUS || !virtualhid_selected) {
@@ -614,6 +717,7 @@ namespace platf::virtualhid {
     const auto &selection = profile_for_metadata(metadata);
     auto profile = selection.profile();
     profile.name = std::format("Sunshine {}", profile.name);
+    apply_target_seat(profile);
     if (config::input.gamepad != "auto"sv) {
       BOOST_LOG(info) << "Gamepad "sv << id.globalIndex << " will be "sv << profile.name << " (manual selection)"sv;
     } else {
@@ -799,18 +903,34 @@ namespace platf::virtualhid {
     }
   }
 
-  void abs_mouse(input_context_t &context, const touch_port_t &touch_port, float x, float y) {
-    if (context.mouse) {
-      log_failure(
-        "submit libvirtualhid absolute mouse movement"sv,
-        context.mouse->move_absolute(
-          static_cast<std::int32_t>(std::lround(x)),
-          static_cast<std::int32_t>(std::lround(y)),
-          touch_port.width,
-          touch_port.height
-        )
-      );
+  void move_mouse(input_context_t &context, const touch_port_t &touch_port, int delta_x, int delta_y) {
+    if (!context.mouse) {
+      return;
     }
+
+    context.update_mouse_viewport(touch_port);
+    move_mouse(context, delta_x, delta_y);
+  }
+
+  void abs_mouse(input_context_t &context, const touch_port_t &touch_port, float x, float y) {
+    if (!context.mouse) {
+      return;
+    }
+
+    context.update_mouse_viewport(touch_port);
+    if (!context.mouse) {
+      return;
+    }
+
+    log_failure(
+      "submit libvirtualhid absolute mouse movement"sv,
+      context.mouse->move_absolute(
+        x - static_cast<float>(context.mouse_viewport.offset_x),
+        y - static_cast<float>(context.mouse_viewport.offset_y),
+        context.mouse_viewport.width,
+        context.mouse_viewport.height
+      )
+    );
   }
 
   void button_mouse(input_context_t &context, int button, bool release) {
@@ -836,9 +956,9 @@ namespace platf::virtualhid {
     }
   }
 
-  void keyboard_update(input_context_t &context, std::uint16_t modcode, bool release, std::uint8_t flags) {
+  void keyboard_update(input_context_t &context, std::uint16_t modcode, bool release, std::uint8_t flags, bool extended) {
     if (context.keyboard) {
-      log_failure("submit libvirtualhid keyboard input"sv, context.keyboard->submit(keyboard_event(modcode, release, flags)));
+      log_failure("submit libvirtualhid keyboard input"sv, context.keyboard->submit(keyboard_event(modcode, release, flags, extended)));
     }
   }
 
@@ -992,6 +1112,18 @@ namespace platf::virtualhid {
     return support.supports_touchpad || support.supports_motion;
   }
 
+  std::string target_seat() {
+    return lizardbyte::common::get_env("XDG_SEAT");
+  }
+
+  std::string device_name_for_seat(std::string_view base_name, std::string_view seat) {
+    if (seat.empty() || seat == "seat0"sv) {
+      return std::string {base_name};
+    }
+
+    return std::format("{} ({})", base_name, seat);
+  }
+
 }  // namespace platf::virtualhid
 
 namespace platf {
@@ -1023,8 +1155,13 @@ namespace platf {
 
   }  // namespace
 
+  /**
+   * @brief Create the libvirtualhid backend with explicit input-handle ownership.
+   *
+   * @return Owning handle for the global virtual input backend.
+   */
   input_t input() {
-    return {new input_raw_t {}};
+    return input_t {new input_raw_t {}};
   }
 
   std::unique_ptr<client_input_t> allocate_client_input_context(input_t &input) {
@@ -1048,6 +1185,10 @@ namespace platf {
     virtualhid::move_mouse(virtualhid::get_input_context(input), deltaX, deltaY);
   }
 
+  void move_mouse(input_t &input, const touch_port_t &touch_port, int deltaX, int deltaY) {
+    virtualhid::move_mouse(virtualhid::get_input_context(input), touch_port, deltaX, deltaY);
+  }
+
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
     virtualhid::abs_mouse(virtualhid::get_input_context(input), touch_port, x, y);
   }
@@ -1064,8 +1205,8 @@ namespace platf {
     virtualhid::hscroll(virtualhid::get_input_context(input), high_res_distance);
   }
 
-  void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
-    virtualhid::keyboard_update(virtualhid::get_input_context(input), modcode, release, flags);
+  void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags, bool extended) {
+    virtualhid::keyboard_update(virtualhid::get_input_context(input), modcode, release, flags, extended);
   }
 
   void unicode(input_t &input, const char *utf8, int size) {

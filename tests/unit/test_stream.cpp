@@ -16,34 +16,87 @@
 #include <utility>
 #include <vector>
 
+// lib includes
+#include <rs.h>
+
 // local includes
 #include <src/network.h>
 
 namespace stream {
   std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2);
   std::optional<std::pair<std::uint16_t, std::string_view>> parse_control_packet(const ENetPacket &packet);
+  bool test_receive_ping_endpoints(bool session_id_pings);
+
+  namespace fec {
+    /**
+     * @brief Return the production video FEC data-shard limit.
+     *
+     * @param percentage Recovery-shard percentage between 0 and 100.
+     * @return Maximum data shards in one 8-bit Reed-Solomon block.
+     */
+    int max_data_shards(int percentage);
+  }  // namespace fec
 }  // namespace stream
 
+/**
+ * @brief Preserve the 8-bit shard limits for disabled, default, and maximum FEC.
+ */
+TEST(StreamFecTests, PreservesVideoShardLimits) {
+  EXPECT_EQ(stream::fec::max_data_shards(0), 255);
+  EXPECT_EQ(stream::fec::max_data_shards(20), 212);
+  EXPECT_EQ(stream::fec::max_data_shards(100), 127);
+}
+
+/**
+ * @brief Every supported FEC percentage fills the encoder without exceeding its shard limit.
+ */
+TEST(StreamFecTests, FitsDataAndRoundedParityWithinEncoderLimit) {
+  for (int percentage = 1; percentage <= 100; ++percentage) {
+    SCOPED_TRACE(percentage);
+    const auto data_shards = stream::fec::max_data_shards(percentage);
+    const auto parity_shards = (data_shards * percentage + 99) / 100;
+    auto encoder = reed_solomon_new(data_shards, parity_shards);
+    ASSERT_NE(encoder, nullptr);
+    reed_solomon_release(encoder);
+
+    const auto next_data_shards = data_shards + 1;
+    const auto next_parity_shards = (next_data_shards * percentage + 99) / 100;
+    EXPECT_GT(next_data_shards + next_parity_shards, RS8_DATA_SHARDS_MAX);
+  }
+}
+
+TEST(StreamPingTests, KeepsLegacyAudioAndVideoSenderEndpointsSeparate) {
+  for (int attempt = 0; attempt < 20; ++attempt) {
+    ASSERT_TRUE(stream::test_receive_ping_endpoints(false)) << "Attempt " << attempt;
+  }
+}
+
+TEST(StreamPingTests, KeepsSessionIdAudioAndVideoSenderEndpointsSeparate) {
+  for (int attempt = 0; attempt < 20; ++attempt) {
+    ASSERT_TRUE(stream::test_receive_ping_endpoints(true)) << "Attempt " << attempt;
+  }
+}
+
 TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
-  char b1[] = {'a', 'b'};
-  char b2[] = {'c', 'd', 'e'};
-  auto res = stream::concat_and_insert(0, 2, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  std::array<char, 2> b1 = {'a', 'b'};
+  std::array<char, 3> b2 = {'c', 'd', 'e'};
+  auto res = stream::concat_and_insert(0, 2, std::string_view {b1.data(), b1.size()}, std::string_view {b2.data(), b2.size()});
   auto expected = std::vector<uint8_t> {'a', 'b', 'c', 'd', 'e'};
   ASSERT_EQ(res, expected);
 }
 
 TEST(ConcatAndInsertTests, ConcatLargeStrideTest) {
-  char b1[] = {'a', 'b'};
-  char b2[] = {'c', 'd', 'e'};
-  auto res = stream::concat_and_insert(1, sizeof(b1) + sizeof(b2) + 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  std::array<char, 2> b1 = {'a', 'b'};
+  std::array<char, 3> b2 = {'c', 'd', 'e'};
+  auto res = stream::concat_and_insert(1, b1.size() + b2.size() + 1, std::string_view {b1.data(), b1.size()}, std::string_view {b2.data(), b2.size()});
   auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 'e'};
   ASSERT_EQ(res, expected);
 }
 
 TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
-  char b1[] = {'a', 'b'};
-  char b2[] = {'c', 'd', 'e'};
-  auto res = stream::concat_and_insert(1, 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  std::array<char, 2> b1 = {'a', 'b'};
+  std::array<char, 3> b2 = {'c', 'd', 'e'};
+  auto res = stream::concat_and_insert(1, 1, std::string_view {b1.data(), b1.size()}, std::string_view {b2.data(), b2.size()});
   auto expected = std::vector<uint8_t> {0, 'a', 0, 'b', 0, 'c', 0, 'd', 0, 'e'};
   ASSERT_EQ(res, expected);
 }

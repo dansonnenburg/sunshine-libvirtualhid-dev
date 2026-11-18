@@ -41,10 +41,14 @@
 build/
 build-*/
 cmake-*/
-docs/doxyconfig*
+/.dockle/
+/_site/
 
 # npm
 node_modules/
+coverage/
+junit.xml
+.vitest/
 
 # Translations
 *.mo

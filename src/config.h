@@ -15,8 +15,24 @@
 
 // local includes
 #include "nvenc/nvenc_config.h"
+#include "string_hash.h"
 
 namespace config {
+  /**
+   * @brief Owning configuration entries supporting lookup by string view or C string.
+   */
+  using config_map_t = std::unordered_map<std::string, std::string, util::transparent_string_hash, std::equal_to<>>;
+
+  namespace nv {
+    /**
+     * @brief Convert Sunshine's NVENC quality preset number to FFmpeg's stable symbolic name.
+     *
+     * @param quality_preset Validated Sunshine quality preset in the range 1 through 7.
+     * @return FFmpeg preset name from `p1` through `p7`.
+     */
+    std::string ffmpeg_preset_from_quality(int quality_preset);
+  }  // namespace nv
+
   // Valid range for the packetsize limit
   constexpr int PACKETSIZE_MIN = 200;  ///< Lowest accepted configured packet size in bytes.
   constexpr int PACKETSIZE_MAX = 65535;  ///< Highest accepted configured packet size in bytes.
@@ -24,12 +40,13 @@ namespace config {
   constexpr int PACKETSIZE_LARGE = 1456;  ///< Default large packet size that avoids common MTU fragmentation.
 
   inline constexpr std::string_view GAMEPAD_DRIVER_ALL = "all";  ///< Allow every available Windows virtual gamepad driver.
-  inline constexpr std::string_view GAMEPAD_DRIVER_VIRTUALHID = "virtualhid";  ///< Allow only Virtual HID Driver for Windows gamepads.
+  inline constexpr std::string_view GAMEPAD_DRIVER_VIRTUALHID = "virtualhid";  ///< Use Virtual HID Broker for gamepads on Windows or macOS.
   inline constexpr std::string_view GAMEPAD_DRIVER_VIGEMBUS = "vigembus";  ///< Allow only ViGEmBus for Windows gamepads.
   inline constexpr std::string_view GAMEPAD_DRIVER_LIBVIRTUALHID_DEV = "libvirtualhid-dev";  ///< Use Dan's experimental static HID gamepad driver.
+  inline constexpr std::string_view GAMEPAD_DRIVER_NONE = "none";  ///< Disable virtual gamepads on Windows and macOS.
 
   // track modified config options
-  inline std::unordered_map<std::string, std::string> modified_config_settings;  ///< Configuration keys changed during the current parse or UI update.
+  inline config_map_t modified_config_settings;  ///< Configuration keys changed during the current parse or UI update.
 
   // sensitive values that should be redacted from logging
   /**
@@ -45,7 +62,7 @@ namespace config {
    * @param vars Parsed configuration entries to log.
    * @param save Whether modified configuration values should be written back to disk.
    */
-  void log_config_settings(const std::unordered_map<std::string, std::string> &vars, bool save);
+  void log_config_settings(const config_map_t &vars, bool save);
 
   /**
    * @brief Video encoder, capture, and color settings loaded from configuration.
@@ -62,6 +79,9 @@ namespace config {
 
     int min_threads;  ///< Minimum number of threads or slices for CPU encoding.
 
+    int max_stream_width;  ///< Maximum streamed video width; larger client requests are downscaled. 0 disables the cap.
+    int max_stream_height;  ///< Maximum streamed video height; larger client requests are downscaled. 0 disables the cap.
+
     struct {
       std::string sw_preset;  ///< FFmpeg software-encoder preset.
       std::string sw_tune;  ///< FFmpeg software-encoder tuning profile.
@@ -74,10 +94,10 @@ namespace config {
     bool nv_sunshine_high_power_mode;  ///< Request NVIDIA high-power mode for Sunshine.
 
     struct {
-      int preset;  ///< Legacy NVENC preset selection.
+      std::string preset;  ///< FFmpeg NVENC preset name shared by supported FFmpeg versions.
       int multipass;  ///< Legacy NVENC multipass mode.
       int h264_coder;  ///< Legacy NVENC H.264 entropy-coding mode.
-      int aq;  ///< Legacy NVENC adaptive-quantization mode.
+      int spatial_aq;  ///< FFmpeg NVENC spatial adaptive-quantization mode.
       int vbv_percentage_increase;  ///< Legacy NVENC VBV buffer-size percentage increase.
     } nv_legacy;  ///< Legacy NVIDIA encoder options kept for config compatibility.
 
@@ -105,8 +125,6 @@ namespace config {
     } amd;  ///< AMD AMF encoder options.
 
     struct {
-      int vt_allow_sw;  ///< Whether VideoToolbox may use software encoding.
-      int vt_require_sw;  ///< Whether VideoToolbox must use software encoding.
       int vt_realtime;  ///< Whether VideoToolbox uses realtime encoding mode.
       int vt_coder;  ///< VideoToolbox entropy-coding mode.
     } vt;  ///< VideoToolbox encoder options.
@@ -122,9 +140,11 @@ namespace config {
     struct {
       int tune;  ///< Vulkan encoder tuning mode: default, HQ, LL, ULL, or lossless.
       int rc_mode;  ///< Vulkan encoder rate-control mode: driver, CQP, CBR, or VBR.
+      int quality;  ///< Vulkan encoder quality preset: 1 = speed, 2 = balanced (default), 3 = quality.
     } vk;  ///< Vulkan encoder options.
 
     std::string capture;  ///< Capture backend name selected by configuration.
+    bool fp16_sdr_gamma_encoded;  ///< Treat FP16 captures of SDR displays as already sRGB gamma-encoded (Windows).
     std::string encoder;  ///< Encoder backend name selected by configuration.
     std::string adapter_name;  ///< Display adapter name selected in configuration.
     std::string output_name;  ///< Display output name selected in configuration.
@@ -206,7 +226,9 @@ namespace config {
       bool config_revert_on_disconnect;  ///< Specify whether to revert display configuration on client disconnect.
       mode_remapping_t mode_remapping;  ///< Display mode remapping rules grouped by automatic selection mode.
       workarounds_t wa;  ///< Display-device compatibility workarounds.
-    } dd;  ///< Display-device integration settings.
+    };
+
+    dd_t dd;  ///< Display-device integration settings.
 
     int max_bitrate;  ///< Maximum bitrate ceiling in kbps for bitrate requested from the client.
     double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = half of client's requested framerate.
@@ -220,6 +242,7 @@ namespace config {
     std::string virtual_sink;  ///< Virtual audio sink for audio routing
     bool stream;  ///< Enable audio streaming to clients
     bool install_steam_drivers;  ///< Install Steam audio drivers for enhanced compatibility
+    bool external_audio;  ///< Windows capture-only mode; an external router owns endpoint defaults and formats.
   };
 
   /**
@@ -243,7 +266,7 @@ namespace config {
 
     std::string file_apps;  ///< Path to the configured applications file.
 
-    int fec_percentage;  ///< Percentage of forward-error-correction packets to add to the stream.
+    int fec_percentage;  ///< Percentage of forward-error-correction packets to add to the stream (0-100); 0 disables FEC.
 
     // Video encryption settings for LAN and WAN streams
     int lan_encryption_mode;  ///< Video encryption policy for LAN clients.
@@ -251,6 +274,8 @@ namespace config {
 
     // Limit the packetsize to avoid fragmentation on a low MTU link
     int packetsize;  ///< Maximum payload size for network packets.
+
+    bool dscp_tagging;  ///< Allow DSCP tagging of audio and video traffic when requested by the client.
   };
 
   /**
@@ -282,7 +307,7 @@ namespace config {
     std::chrono::duration<double> key_repeat_period;  ///< Interval between repeated keyboard key events.
 
     std::string gamepad;  ///< Virtual controller profile selected by configuration.
-    std::string gamepad_driver;  ///< Windows virtual gamepad driver policy, or empty until the user chooses one.
+    std::string gamepad_driver;  ///< Virtual gamepad backend policy on Windows and macOS.
     bool ds4_back_as_touchpad_click;  ///< Map Back/Select to touchpad click for PlayStation-style gamepads.
     bool motion_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with motion controls.
     bool touchpad_as_ds4;  ///< Prefer PlayStation-style emulation for client gamepads with touchpad input.
@@ -327,7 +352,7 @@ namespace config {
     prep_cmd_t(std::string &&do_cmd, std::string &&undo_cmd, bool &&elevated):
         do_cmd(std::move(do_cmd)),
         undo_cmd(std::move(undo_cmd)),
-        elevated(std::move(elevated)) {
+        elevated(elevated) {
     }
 
     /**
@@ -338,7 +363,7 @@ namespace config {
      */
     explicit prep_cmd_t(std::string &&do_cmd, bool &&elevated):
         do_cmd(std::move(do_cmd)),
-        elevated(std::move(elevated)) {
+        elevated(elevated) {
     }
 
     std::string do_cmd;  ///< Command to run before the application starts.
@@ -368,7 +393,9 @@ namespace config {
       std::string name;  ///< Executable name from the command line.
       int argc;  ///< Number of command-line arguments.
       char **argv;  ///< Command-line argument vector.
-    } cmd;  ///< Command line used to launch the application.
+    };
+
+    cmd_t cmd;  ///< Command line used to launch the application.
 
     std::uint16_t port;  ///< TCP port used by Sunshine services.
     std::string address_family;  ///< Address family requested for listening sockets.
@@ -414,7 +441,7 @@ namespace config {
    * @param file_content Raw configuration file contents to parse.
    * @return Parsed configuration key-value entries.
    */
-  std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
+  config_map_t parse_config(const std::string_view &file_content);
 
   /**
    * @brief Persist a configuration option when the active file does not already define it.
@@ -435,4 +462,15 @@ namespace config {
    * @return True when the `all` preference was persisted and applied; otherwise, false.
    */
   bool select_all_gamepad_drivers_if_licensed(bool virtualhid_licensed);
+
+  /**
+   * @brief Apply the configured stream resolution cap to a client-requested resolution.
+   *
+   * The result preserves the aspect ratio of the request and is rounded down to even
+   * dimensions as required by encoders and decoders.
+   * @param width Client-requested width, updated in place when the cap applies.
+   * @param height Client-requested height, updated in place when the cap applies.
+   * @return `true` when the resolution was capped.
+   */
+  bool cap_stream_resolution(int &width, int &height);
 }  // namespace config

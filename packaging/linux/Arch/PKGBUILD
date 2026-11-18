@@ -1,4 +1,4 @@
-# Edit on github: https://github.com/LizardByte/Sunshine/blob/master/packaging/linux/Arch/PKGBUILD
+# Edit on github: https://github.com/SunshineStream/Sunshine/blob/master/packaging/linux/Arch/PKGBUILD
 # Reference: https://wiki.archlinux.org/title/PKGBUILD
 
 ## options
@@ -61,6 +61,8 @@ depends=(
 makedepends=(
   'appstream'
   'appstream-glib'
+  'boost'
+  'boost-libs'
   'cmake'
   'desktop-file-utils'
   "gcc${_gcc_dep_suffix}"

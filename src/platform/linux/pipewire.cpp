@@ -16,6 +16,7 @@
 
 // local includes
 #include "cuda.h"
+#include "display_geometry.h"
 #include "graphics.h"
 #include "src/main.h"
 #include "src/platform/common.h"
@@ -82,6 +83,7 @@ namespace pipewire {
     std::atomic<int> color_primaries {0};  ///< PipeWire color-primaries metadata for the stream.
     std::atomic<int> transfer_function {0};  ///< PipeWire transfer-function metadata for the stream.
     std::atomic<bool> stream_dead {false};  ///< Whether the PipeWire stream has been destroyed.
+    std::atomic<bool> has_streamed {false};  ///< Whether this stream has ever reached PW_STREAM_STATE_STREAMING.
     pw_stream_state previous_state;  ///< Previous PipeWire stream state reported by callbacks.
     pw_stream_state current_state;  ///< Current PipeWire stream state reported by callbacks.
     std::string err_msg;  ///< Last PipeWire error message reported by the stream.
@@ -184,11 +186,6 @@ namespace pipewire {
         pw_context_destroy(context);
         context = nullptr;
       }
-      // Release pipewire file descriptor
-      if (fd >= 0) {
-        BOOST_LOG(debug) << "[pipewire] Close pipewire_fd"sv;
-        close(fd);
-      }
       // Release pipewire thread loop
       BOOST_LOG(debug) << "[pipewire] Stop PW thread loop"sv;
       pw_thread_loop_unlock(loop);
@@ -264,36 +261,47 @@ namespace pipewire {
     /**
      * @brief Initialize PipeWire core objects and optional stream negotiation.
      *
-     * @param stream_fd Stream fd.
+     * @param stream_fd Stream fd, or -1 to connect to the local PipeWire daemon. init() takes it over: PipeWire closes it
+     *                  after a successful connection, and init() closes it when the connection could not be set up.
      * @param stream_node Stream node.
      * @param stream_object_serial Stream object serial.
      * @param shared_state Shared state.
      * @return 0 on success; nonzero or negative platform status on failure.
      */
     int init(const int stream_fd, const uint32_t stream_node, const uint64_t stream_object_serial, std::shared_ptr<shared_state_t> shared_state) {
-      fd = stream_fd;
       node = stream_node;
       object_serial = stream_object_serial;
       stream_data.shared = std::move(shared_state);
+      stream_data.shared->has_streamed.store(false);
 
       pw_thread_loop_lock(loop);
       BOOST_LOG(debug) << "[pipewire] Setup PW context"sv;
       context = pw_context_new(pw_thread_loop_get_loop(loop), nullptr, 0);
       if (context) {
-        BOOST_LOG(debug) << "[pipewire] Connect PW context to fd"sv;
-        if (fd >= 0) {
-          core = pw_context_connect_fd(context, fd, nullptr, 0);
+        if (stream_fd >= 0) {
+          BOOST_LOG(debug) << "[pipewire] Connect PW core on fd "sv << stream_fd;
+          core = pw_context_connect_fd(context, stream_fd, nullptr, 0);
         } else {
+          BOOST_LOG(debug) << "[pipewire] Connect PW local core"sv;
           core = pw_context_connect(context, nullptr, 0);
         }
         if (core) {
           pw_core_add_listener(core, &core_listener, &core_events, nullptr);
         } else {
           BOOST_LOG(debug) << "[pipewire] Failed to connect to PW core. Error: "sv << errno << "(" << strerror(errno) << ")"sv;
+          // A failed pw_context_connect_fd() leaves the fd open
+          if (stream_fd >= 0) {
+            close(stream_fd);
+          }
+          pw_thread_loop_unlock(loop);
           return -1;
         }
       } else {
         BOOST_LOG(debug) << "[pipewire] Failed to setup PW context. Error: "sv << errno << "(" << strerror(errno) << ")"sv;
+        if (stream_fd >= 0) {
+          close(stream_fd);
+        }
+        pw_thread_loop_unlock(loop);
         return -1;
       }
 
@@ -360,7 +368,7 @@ namespace pipewire {
         // Connection via pipewire object serial if it is supported and the serial is valid (lower 32-bits != SPA_ID_INVALID, see also PW_KEY_OBJECT_SERIAL docs)
         if (SUNSHINE_USE_PIPEWIRE_OBJECT_SERIAL && (object_serial & SPA_ID_INVALID) != SPA_ID_INVALID) {
           pw_properties_setf(props, PW_KEY_TARGET_OBJECT, "%" PRIu64, object_serial);
-          BOOST_LOG(debug) << "[pipewire] Connect PW stream - fd: "sv << fd << " object serial: "sv << object_serial;
+          BOOST_LOG(debug) << "[pipewire] Connect PW stream on object serial: "sv << object_serial;
           result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, PW_ID_ANY, (enum pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params.data(), n_params);
           if (result < 0) {
             // Unset object serial for retry with node id
@@ -371,7 +379,7 @@ namespace pipewire {
         }
         // Connection via legacy (and deprecated) pipewire node id
         if (result < 0) {
-          BOOST_LOG(debug) << "[pipewire] Connect PW stream - fd: "sv << fd << " node: "sv << node;
+          BOOST_LOG(debug) << "[pipewire] Connect PW stream on node: "sv << node;
           result = pw_stream_connect(stream_data.stream, PW_DIRECTION_INPUT, node, (enum pw_stream_flags)(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS), params.data(), n_params);
         }
       }
@@ -395,21 +403,230 @@ namespace pipewire {
     }
 
     /**
+     * @brief Compositors that require version-based checks for optimal stream setup.
+     */
+    enum class compositor_type_e {
+      unknown,  ///< Unknown
+      gnome,  ///< GNOME Shell is a proxy for Mutter.
+      kwin  ///< KWin
+    };
+
+    /**
+     * @brief Compositor type and version information.
+     */
+    struct compositor_version_t {
+      compositor_type_e type = compositor_type_e::unknown;  ///< Compositor type (gnome, kde...).
+      std::vector<int> version;  ///< Compositor version.
+    };
+
+    /**
+     * @brief Fetch compositor type and version for processing.
+     *
+     * @return A struct containing the compositor type and version.
+     */
+    static compositor_version_t get_running_compositor() {
+      using enum compositor_type_e;
+
+      if (auto version = get_running_compositor_version(kwin); !version.empty()) {
+        return {kwin, std::move(version)};
+      }
+
+      if (auto version = get_running_compositor_version(gnome); !version.empty()) {
+        return {gnome, std::move(version)};
+      }
+
+      return {};
+    }
+
+    /**
+     * @brief Fetch compositor version information using DBus calls.
+     *
+     * @param compositor_type The compositor we should attempt to fetch version information for.
+     * @return A vector with 2-3 elements containing the major.minor.micro versions or an empty vector if the version could not be determined.
+     */
+    static std::vector<int> get_running_compositor_version(enum compositor_type_e compositor_type) {
+#if !GLIB_CHECK_VERSION(2, 74, 0)
+      // Compatibility for Ubuntu 22.04 (Glib 2.72)
+      constexpr auto G_REGEX_DEFAULT = static_cast<GRegexCompileFlags>(0);
+      constexpr auto G_REGEX_MATCH_DEFAULT = static_cast<GRegexMatchFlags>(0);
+#endif
+      auto conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+      std::vector<int> result;
+
+      if (!conn) {
+        return result;
+      }
+
+      const gchar *version_regex;
+      GVariant *reply;
+
+      using enum compositor_type_e;
+      if (compositor_type == kwin) {
+        version_regex = "KWin version: ([0-9]+)\\.([0-9]+)\\.([0-9]+)";
+        reply = g_dbus_connection_call_sync(
+          conn,
+          "org.kde.KWin",
+          "/KWin",
+          "org.kde.KWin",
+          "supportInformation",
+          nullptr,
+          G_VARIANT_TYPE("(s)"),
+          G_DBUS_CALL_FLAGS_NONE,
+          -1,
+          nullptr,
+          nullptr
+        );
+      } else {
+        version_regex = "([0-9]+)\\.([0-9]+)(?:\\.([0-9]+))?";
+        reply = g_dbus_connection_call_sync(
+          conn,
+          "org.gnome.Shell",
+          "/org/gnome/Shell",
+          "org.freedesktop.DBus.Properties",
+          "Get",
+          g_variant_new("(ss)", "org.gnome.Shell", "ShellVersion"),
+          G_VARIANT_TYPE("(v)"),
+          G_DBUS_CALL_FLAGS_NONE,
+          -1,
+          nullptr,
+          nullptr
+        );
+      }
+
+      if (!reply) {
+        g_clear_object(&conn);
+        return result;
+      }
+
+      g_autofree gchar *version_str = nullptr;
+
+      if (compositor_type == kwin) {
+        g_variant_get(reply, "(s)", &version_str);
+      } else {
+        GVariant *inner_variant = nullptr;
+        g_variant_get(reply, "(v)", &inner_variant);
+        if (inner_variant) {
+          version_str = g_variant_dup_string(inner_variant, nullptr);
+          g_variant_unref(inner_variant);
+        }
+      }
+
+      if (!version_str) {
+        g_variant_unref(reply);
+        g_clear_object(&conn);
+        return result;
+      }
+
+      if (auto *regex = g_regex_new(version_regex, G_REGEX_DEFAULT, G_REGEX_MATCH_DEFAULT, nullptr); regex) {
+        GMatchInfo *match_info = nullptr;
+        g_regex_match(regex, version_str, G_REGEX_MATCH_DEFAULT, &match_info);
+
+        if (g_match_info_matches(match_info)) {
+          g_autofree const gchar *major = g_match_info_fetch(match_info, 1);
+          g_autofree const gchar *minor = g_match_info_fetch(match_info, 2);
+          g_autofree const gchar *micro = g_match_info_fetch(match_info, 3);
+
+          if (major) {
+            result.emplace_back(std::atoi(major));
+          }
+          if (minor) {
+            result.emplace_back(std::atoi(minor));
+          }
+          if (micro && *micro != '\0') {
+            result.emplace_back(std::atoi(micro));
+          }
+        }
+        g_match_info_free(match_info);
+        g_regex_unref(regex);
+      }
+
+      g_variant_unref(reply);
+      g_clear_object(&conn);
+      return result;
+    }
+
+    /**
+     * @brief Determine if Pipewire's pts metadata is suitable for client pacing based on compositor type/version whitelist.
+     *
+     * @param compositor Struct containing compositor type and version.
+     * @param selected_display_name Name of display - specifically the connector type - such as DP-1, HDMI-1, etc.
+     * @return True if pts metadata is suitable.
+     */
+    static bool use_pipewire_pts(const compositor_version_t &compositor, const std::string &selected_display_name) {
+      // KWin: use Pipewire pts metadata for versions 6.7.80+ (6.8 beta) or newer.
+      // Mutter: use Pipewire pts metadata for Mutter 51 onwards, but pts is reliable only for virtual monitors (Meta-).
+      // All other cases: don't use Pipewire pts metadata directly.
+
+      bool use_pts = false;
+      bool using_virtual_monitor = false;
+
+      using enum compositor_type_e;
+      switch (compositor.type) {
+        case gnome:
+          using_virtual_monitor = selected_display_name.starts_with("Meta-");
+          use_pts = (using_virtual_monitor && compositor.version[0] >= 51);
+          break;
+        case kwin:
+          use_pts = (compositor.version[0] > 6 || (compositor.version[0] == 6 && (compositor.version[1] > 7 || (compositor.version[1] == 7 && compositor.version[2] > 79))));
+          break;
+        default:
+          break;
+      }
+
+      BOOST_LOG(info) << "[pipewire] Using frame_timestamp (pts) metadata source: "sv
+                      << (use_pts ? "Pipewire (via compositor)" : PROJECT_NAME);
+      return use_pts;
+    }
+
+    /**
+     * @brief Determine if the active compositor is suited for variable rate capture based on type/version whitelist.
+     *
+     * @param compositor Struct containing the compositor type and version.
+     * @return True if variable rate capture is suitable.
+     */
+    static bool
+      use_variable_rate(const compositor_version_t &compositor) {
+      // If the active compositor is KWin, request variable rate (0, 1) capture for versions 5.x-6.7.79 (up to 6.7 stable series).
+      // Issue: KWin <=6.7 has a ~3% fixed-rate pacing deficit vs the requested framerate; variable rate avoids this and prioritizes gaming smoothness.
+      //        KWin 6.7 regresses variable rate (desktop animations run at half speed, but doesn't affect in-game pacing). Ref: https://bugs.kde.org/show_bug.cgi?id=524129
+      // Issue: KWin 6.8 still has desktop animation pacing issues with variable rate, but fixes the 3% fixed-rate pacing deficit. Fixed-rate pacing has
+      //        new regression tied to 'commit-timing'/VK_KHR_present_timing support when Vsync/FIFO is enabled. Ref: https://bugs.kde.org/show_bug.cgi?id=525619
+      // Summary: KWin 5.5-6.6 have excellent (variable) pacing. KWin 6.7 has poor desktop animation pacing (variable) but good game pacing.
+      //          KWin 6.8+ will have good overall (fixed) pacing if #525619 can be resolved, otherwise we will update docs advising to disable VSync in games.
+
+      // All other compositors (including Mutter) will default to variable rate.
+      bool variable_rate = true;
+
+      using enum compositor_type_e;
+      if (compositor.type == kwin) {
+        variable_rate = (compositor.version[0] == 5 || (compositor.version[0] == 6 && (compositor.version[1] < 7 || (compositor.version[1] == 7 && compositor.version[2] < 80))));
+      }
+
+      return variable_rate;
+    }
+
+    /**
      * @brief Copy PipeWire metadata into the Sunshine image descriptor.
      *
      * @param img_descriptor Image descriptor receiving timestamps, sequence, and damage flags.
      * @param buf Raw byte buffer used for serialization.
      */
     static void fill_img_metadata(egl::img_descriptor_t *img_descriptor, struct spa_buffer *buf) {
-      img_descriptor->frame_timestamp = std::chrono::steady_clock::now();
-
       struct spa_meta_header *h = static_cast<struct spa_meta_header *>(
         spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*h))
       );
+
+      img_descriptor->seq.reset();
+      img_descriptor->pts.reset();
       if (h) {
         img_descriptor->seq = h->seq;
-        img_descriptor->pts = h->pts;
+        if (h->pts > 0) {
+          img_descriptor->pts = h->pts;
+        }
       }
+      img_descriptor->frame_timestamp = (img_descriptor->pts.has_value() && prefer_pipewire_pts) ?
+                                          std::chrono::steady_clock::time_point(std::chrono::nanoseconds(img_descriptor->pts.value())) :
+                                          std::chrono::steady_clock::now();
 
       if (buf->n_datas > 0) {
         img_descriptor->pw_flags = buf->datas[0].chunk->flags;
@@ -490,13 +707,15 @@ namespace pipewire {
       negotiate_maxframerate_ = negotiate_maxframerate;
     }
 
+    inline static std::atomic prefer_pipewire_pts {false};  ///< Whether the session should directly passthrough Pipewire pts metadata for client pacing.
+    inline static std::atomic negotiate_variable_rate {true};  ///< Whether the session should request variable rate (maxFrameRate = 0/1) capture.
+
   private:
     struct pw_thread_loop *loop;
     struct pw_context *context;
     struct pw_core *core;
     struct spa_hook core_listener;
     struct stream_data_t stream_data;
-    int fd;
     uint32_t node;
     uint64_t object_serial;
     bool negotiate_maxframerate_ = true;
@@ -550,11 +769,11 @@ namespace pipewire {
       return static_cast<struct spa_pod *>(spa_pod_builder_pop(b, &object_frame));
     }
 
-    static void on_core_info_cb([[maybe_unused]] void *user_data, const struct pw_core_info *pw_info) {
+    static void on_core_info_cb([[maybe_unused]] void *user_data, const struct pw_core_info *pw_info) {  // NOSONAR(cpp:S5008): PipeWire event callbacks require a void pointer for user data.
       BOOST_LOG(info) << "[pipewire] Connected to pipewire version "sv << pw_info->version;
     }
 
-    static void on_core_error_cb([[maybe_unused]] void *user_data, const uint32_t id, const int seq, [[maybe_unused]] int res, const char *message) {
+    static void on_core_error_cb([[maybe_unused]] void *user_data, const uint32_t id, const int seq, [[maybe_unused]] int res, const char *message) {  // NOSONAR(cpp:S5008): PipeWire event callbacks require a void pointer for user data.
       BOOST_LOG(info) << "[pipewire] Pipewire Error, id:"sv << id << " seq:"sv << seq << " message: "sv << message;
     }
 
@@ -564,7 +783,16 @@ namespace pipewire {
       .error = on_core_error_cb,
     };
 
-    static void on_stream_state_changed(void *user_data, enum pw_stream_state old, enum pw_stream_state state, const char *err_msg) {
+  public:
+    /**
+     * @brief Record stream transitions, retaining startup success after subsequent pauses or errors.
+     *
+     * @param user_data Stream data registered with the PipeWire listener.
+     * @param old Previous PipeWire stream state.
+     * @param state New PipeWire stream state.
+     * @param err_msg Error description, or nullptr for a normal transition.
+     */
+    static void on_stream_state_changed(void *user_data, enum pw_stream_state old, enum pw_stream_state state, const char *err_msg) {  // NOSONAR(cpp:S5008): PipeWire event callbacks require a void pointer for user data.
       if (err_msg != nullptr) {
         BOOST_LOG(info) << "[pipewire] PipeWire stream error '" << err_msg << "' on state: " << pw_stream_state_as_string(old)
                         << " -> " << pw_stream_state_as_string(state);
@@ -576,6 +804,11 @@ namespace pipewire {
       auto *d = static_cast<stream_data_t *>(user_data);
 
       switch (state) {
+        case PW_STREAM_STATE_STREAMING:
+          if (d->shared) {
+            d->shared->has_streamed.store(true);
+          }
+          break;
         case PW_STREAM_STATE_PAUSED:
           if (d->shared && old == PW_STREAM_STATE_STREAMING) {
             {
@@ -609,7 +842,8 @@ namespace pipewire {
       }
     }
 
-    static void on_process(void *user_data) {
+  private:
+    static void on_process(void *user_data) {  // NOSONAR(cpp:S5008): PipeWire event callbacks require a void pointer for user data.
       const auto d = static_cast<struct stream_data_t *>(user_data);
       struct pw_buffer *b = nullptr;
 
@@ -661,7 +895,7 @@ namespace pipewire {
       d->frame_cv.notify_one();
     }
 
-    static void on_param_changed(void *user_data, uint32_t id, const struct spa_pod *param) {
+    static void on_param_changed(void *user_data, uint32_t id, const struct spa_pod *param) {  // NOSONAR(cpp:S5008): PipeWire event callbacks require a void pointer for user data.
       const auto d = static_cast<struct stream_data_t *>(user_data);
 
       d->current_buffer = nullptr;
@@ -794,41 +1028,24 @@ namespace pipewire {
     virtual int configure_stream(const std::string &display_name, int &out_pipewire_fd, uint32_t &out_pipewire_node, uint64_t &out_pipewire_objectserial) = 0;
 
     /**
-     *  @brief Verify and update display parameters for logical dimensions, desktop dimensions and logical desktop dimensions (default is adapted from wlgrab)
+     * @brief Resolve the streamed connector and full desktop bounds for absolute input.
      */
     virtual void verify_and_update_display_parameters() {
-      // Query outputs directly using wayland wl::monitors()
-      if (logical_height <= 0 || logical_width <= 0 || env_logical_height <= 0 || env_logical_width <= 0 || env_height <= 0 || env_width <= 0) {
-        int desktop_width = 0;
-        int desktop_height = 0;
-        int desktop_logical_width = 0;
-        int desktop_logical_height = 0;
-        for (const auto &monitor : wl::monitors()) {
-          BOOST_LOG(debug) << "[pipewire] Found output: '"sv << monitor->name << "' offset: "sv << monitor->viewport.offset_x << 'x' << monitor->viewport.offset_y << " resolution: "sv << monitor->viewport.width << 'x' << monitor->viewport.height << " logical resolution: "sv << monitor->viewport.logical_width << 'x' << monitor->viewport.logical_height;
-          // If logical_width and logical_height are not valid try to update them to correct values by matching to monitor
-          // position/dimension or position/logical dimensions here since we're iterating for maximum environment size anyway
-          if ((logical_width <= 0 || logical_height <= 0) && monitor->viewport.offset_x == offset_x && monitor->viewport.offset_y == offset_y && ((monitor->viewport.width == width && monitor->viewport.height == height) || (monitor->viewport.logical_width == width && monitor->viewport.logical_height == height))) {
-            this->logical_width = monitor->viewport.logical_width;
-            this->logical_height = monitor->viewport.logical_height;
-            BOOST_LOG(debug) << "[pipewire] Set logical resolution: "sv << logical_width << 'x' << logical_height;
+      platf::desktop_geometry_t desktop;
+      for (const auto &monitor : wl::monitors()) {
+        desktop.add(monitor->viewport);
+        if (monitor->viewport.offset_x == offset_x && monitor->viewport.offset_y == offset_y && ((monitor->viewport.width == width && monitor->viewport.height == height) || (monitor->viewport.logical_width == width && monitor->viewport.logical_height == height))) {
+          if (logical_width <= 0 || logical_height <= 0) {
+            logical_width = monitor->viewport.logical_width;
+            logical_height = monitor->viewport.logical_height;
           }
-          // Update desktop dimensions to setup maximum environment size over all screens
-          desktop_width = std::max(desktop_width, monitor->viewport.offset_x + monitor->viewport.width);
-          desktop_height = std::max(desktop_height, monitor->viewport.offset_y + monitor->viewport.height);
-          // Update desktop logical dimensions to setup maximum logical environment size over all screens
-          desktop_logical_width = std::max(desktop_logical_width, monitor->viewport.offset_x + monitor->viewport.logical_width);
-          desktop_logical_height = std::max(desktop_logical_height, monitor->viewport.offset_y + monitor->viewport.logical_height);
+          if (output_name.empty()) {
+            output_name = monitor->name;
+          }
         }
-        if (env_height <= 0 || env_width <= 0) {
-          this->env_width = desktop_width;
-          this->env_height = desktop_height;
-          BOOST_LOG(debug) << "[pipewire] Set desktop resolution: "sv << env_width << 'x' << env_height;
-        }
-        if (env_logical_height <= 0 || env_logical_width <= 0) {
-          this->env_logical_width = desktop_logical_width;
-          this->env_logical_height = desktop_logical_height;
-          BOOST_LOG(debug) << "[pipewire] Set desktop logical resolution: "sv << env_logical_width << 'x' << env_logical_height;
-        }
+      }
+      if (desktop.bounds().width > 0 && desktop.bounds().height > 0) {
+        desktop.apply(*this);
       }
     }
 
@@ -844,13 +1061,12 @@ namespace pipewire {
       // calculate frame interval we should capture at
       delay = ::video::capture_frame_interval(config);
 
-      // WORKAROUND: if the active compositor is KWin, request variable rate (0, 1) capture only for versions 5.x-6.7.x.
-      // Ref: https://bugs.kde.org/show_bug.cgi?id=524129
-      // Also negotiate variable rate for all other compositors. Mutter's variable rate pacing is superior.
-      const static std::vector<int> kwin_version = get_running_kwin_version();
-      const static bool negotiate_variable_rate = kwin_version.empty() || (kwin_version[0] == 5 || (kwin_version[0] == 6 && kwin_version[1] < 8));
+      const static auto compositor = pipewire.get_running_compositor();
 
-      const AVRational fps = (negotiate_variable_rate ? AVRational {0, 1} : ::video::framerate_to_rational(config));
+      // Determine if variable rate should be negotiated based on compositor type/versioning.
+      pipewire.negotiate_variable_rate = pipewire.use_variable_rate(compositor);
+
+      const AVRational fps = (pipewire.negotiate_variable_rate ? AVRational {0, 1} : ::video::framerate_to_rational(config));
       if (fps.den != 1) {
         BOOST_LOG(info) << "[pipewire] Requested frame rate: "sv << fps.num << "/"sv << fps.den << ", approx. "sv << av_q2d(fps) << " fps"sv;
       } else if (fps.num == 0 && fps.den == 1) {
@@ -877,6 +1093,9 @@ namespace pipewire {
 
       // Verify or update display parameters for streaming to ensure absolute touch inputs work as expected
       verify_and_update_display_parameters();
+
+      // Determine if pts metadata should be sourced from Pipewire or sampled by Sunshine at time of capture.
+      pipewire.prefer_pipewire_pts = pipewire.use_pipewire_pts(compositor, display_name);
 
       if (!shared_state) {
         shared_state = std::make_shared<shared_state_t>();
@@ -988,7 +1207,7 @@ namespace pipewire {
       img->serial = std::numeric_limits<decltype(img->serial)>::max();
       img->data = nullptr;
       img->data_owned = false;
-      std::fill_n(img->sd.fds, 4, -1);
+      img->sd.fds.fill(-1);
 
       return img;
     }
@@ -1003,12 +1222,22 @@ namespace pipewire {
       return false;  // Return to default stream dead handling.
     }
 
+    /**
+     * @brief Capture PipeWire frames until capture stops or the stream needs reinitialization.
+     *
+     * @param push_captured_image_cb Callback receiving a captured image or a capture timeout.
+     * @param pull_free_image_cb Callback providing an available image buffer.
+     * @param cursor Whether the cursor should be included in the captured image.
+     * @return Final capture status reported to the streaming pipeline.
+     */
     platf::capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+      using enum platf::capture_e;
+
       auto next_frame = std::chrono::steady_clock::now();
 
       if (pipewire.ensure_stream(mem_type, width, height, target_framerate, dmabuf_infos.data(), n_dmabuf_infos, display_is_nvidia) < 0) {
         BOOST_LOG(error) << "[pipewire] Failed to ensure pipewire stream. capture() failed with error.";
-        return platf::capture_e::error;
+        return capture_error;
       }
       sleep_overshoot_logger.reset();
 
@@ -1024,7 +1253,7 @@ namespace pipewire {
           }
           // Re-init the capture if the stream is dead for any other reason
           BOOST_LOG(warning) << "[pipewire] PipeWire stream disconnected. Forcing session reset."sv;
-          return platf::capture_e::reinit;
+          return reinit;
         }
 
         // Use unpaced event driven capture when possible
@@ -1034,27 +1263,27 @@ namespace pipewire {
 
         std::shared_ptr<platf::img_t> img_out;
         switch (const auto status = snapshot(pull_free_image_cb, img_out, 1000ms, *cursor)) {
-          case platf::capture_e::reinit:
-          case platf::capture_e::error:
-          case platf::capture_e::interrupted:
+          case reinit:
+          case capture_error:
+          case interrupted:
             pipewire.frame_cv().notify_all();
             return status;
-          case platf::capture_e::timeout:
+          case timeout:
             if (!pull_free_image_cb(img_out)) {
               // Detect if shutdown is pending
               BOOST_LOG(debug) << "[pipewire] PipeWire: timeout -> shutdown pending -> interrupt nudge";
               pipewire.frame_cv().notify_all();
-              return platf::capture_e::interrupted;
+              return interrupted;
             }
             if (!push_captured_image_cb(std::move(img_out), false)) {
               BOOST_LOG(debug) << "[pipewire] PipeWire: timeout -> !push_captured_image_cb -> ok";
-              return platf::capture_e::ok;
+              return ok;
             }
             break;
-          case platf::capture_e::ok:
+          case ok:
             if (!push_captured_image_cb(std::move(img_out), true)) {
               BOOST_LOG(debug) << "[pipewire] PipeWire: ok -> !push_captured_image_cb -> ok";
-              return platf::capture_e::ok;
+              return ok;
             }
             break;
           default:
@@ -1063,7 +1292,7 @@ namespace pipewire {
         }
       }
 
-      return platf::capture_e::ok;
+      return ok;
     }
 
     /**
@@ -1175,89 +1404,6 @@ namespace pipewire {
       }
 
       return false;
-    }
-
-    /**
-     * Fetch the currently running KWin version (if available from its DBUS support information method)
-     *
-     * @return A vector with 3 elements containing KWin's major.minor.micro version or an empty vector if KWin's version could not be determined
-     */
-    static std::vector<int> get_running_kwin_version() {
-#if !GLIB_CHECK_VERSION(2, 74, 0)
-      // Compatibility for Ubuntu 22.04 (Glib 2.72)
-      constexpr auto G_REGEX_DEFAULT = static_cast<GRegexCompileFlags>(0);
-      constexpr auto G_REGEX_MATCH_DEFAULT = static_cast<GRegexMatchFlags>(0);
-#endif
-      auto conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
-      std::vector<int> result;
-
-      if (!conn) {
-        return result;
-      }
-
-      auto reply = g_dbus_connection_call_sync(
-        conn,
-        "org.kde.KWin",
-        "/KWin",
-        "org.kde.KWin",
-        "supportInformation",
-        nullptr,
-        G_VARIANT_TYPE("(s)"),
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        nullptr,
-        nullptr
-      );
-
-      if (!reply) {
-        g_clear_object(&conn);
-        return result;
-      }
-
-      g_autofree gchar *support_info = nullptr;
-      g_variant_get(reply, "(s)", &support_info);
-
-      if (!support_info) {
-        g_variant_unref(reply);
-        g_clear_object(&conn);
-        return result;
-      }
-
-      auto *regex = g_regex_new(
-        "KWin version: ([0-9]+)\\.([0-9]+)\\.([0-9]+)",
-        G_REGEX_DEFAULT,
-        G_REGEX_MATCH_DEFAULT,
-        nullptr
-      );
-
-      if (!regex) {
-        g_variant_unref(reply);
-        g_clear_object(&conn);
-        return result;
-      }
-
-      GMatchInfo *match_info = nullptr;
-      g_regex_match(regex, support_info, G_REGEX_MATCH_DEFAULT, &match_info);
-
-      if (g_match_info_matches(match_info)) {
-        g_autofree const gchar *major =
-          g_match_info_fetch(match_info, 1);
-        g_autofree const gchar *minor =
-          g_match_info_fetch(match_info, 2);
-        g_autofree const gchar *micro =
-          g_match_info_fetch(match_info, 3);
-
-        result.emplace_back(std::atoi(major));
-        result.emplace_back(std::atoi(minor));
-        result.emplace_back(std::atoi(micro));
-      }
-
-      g_match_info_free(match_info);
-      g_regex_unref(regex);
-      g_variant_unref(reply);
-      g_clear_object(&conn);
-
-      return result;
     }
 
   private:

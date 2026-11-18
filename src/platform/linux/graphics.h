@@ -5,6 +5,8 @@
 #pragma once
 
 // standard includes
+#include <array>
+#include <functional>
 #include <optional>
 #include <string_view>
 
@@ -62,7 +64,7 @@ void free_frame(AVFrame *frame);
 /**
  * @brief Owning pointer for an EGL frame object.
  */
-using frame_t = util::safe_ptr<AVFrame, free_frame>;
+using frame_t = util::safe_ptr<AVFrame, &free_frame>;
 
 namespace gl {
   extern GladGLContext ctx;
@@ -357,11 +359,11 @@ namespace gbm {
   /**
    * @brief Function pointer used to destroy a GBM device.
    */
-  typedef void (*device_destroy_fn)(device *gbm);
+  using device_destroy_fn = void (*)(device *gbm);
   /**
    * @brief Function pointer used to create a GBM device from a file descriptor.
    */
-  typedef device *(*create_device_fn)(int fd);
+  using create_device_fn = device *(*)(int fd);
 
   extern device_destroy_fn device_destroy;
   extern create_device_fn create_device;
@@ -407,7 +409,6 @@ namespace egl {
     gl::tex_t tex;  ///< Textures containing the imported Y and UV planes.
     gl::frame_buf_t buf;  ///< OpenGL framebuffer object used for rendering.
 
-    // sizeof(va::DRMPRIMESurfaceDescriptor::objects) / sizeof(va::DRMPRIMESurfaceDescriptor::objects[0]);
     static constexpr std::size_t num_fds = 4;  ///< Maximum number of DMA-BUF plane file descriptors exported by VAAPI.
 
     std::array<file_t, num_fds> fds;  ///< DMA-BUF file descriptors for each exported plane.
@@ -496,11 +497,11 @@ namespace egl {
   struct surface_descriptor_t {
     int width;  ///< Frame or display width in pixels.
     int height;  ///< Frame or display height in pixels.
-    int fds[4];  ///< DMA-BUF file descriptors for up to four planes.
+    std::array<int, 4> fds;  ///< DMA-BUF file descriptors for up to four planes.
     std::uint32_t fourcc;  ///< DRM fourcc pixel format for the buffer.
     std::uint64_t modifier;  ///< DRM format modifier describing the buffer layout.
-    std::uint32_t pitches[4];  ///< Row stride in bytes for each DMA-BUF plane.
-    std::uint32_t offsets[4];  ///< Byte offset to the first pixel for each DMA-BUF plane.
+    std::array<std::uint32_t, 4> pitches;  ///< Row stride in bytes for each DMA-BUF plane.
+    std::array<std::uint32_t, 4> offsets;  ///< Byte offset to the first pixel for each DMA-BUF plane.
   };
 
   /**
@@ -517,6 +518,11 @@ namespace egl {
    * @return EGL context wrapper, or std::nullopt when context creation fails.
    */
   std::optional<ctx_t> make_ctx(display_t::pointer display);
+
+  /**
+   * @brief Allows the EGL privileged worker thread to be constructed early.
+   */
+  void ensure_privileged_egl_worker_started();
 
   /**
    * @brief Import an RGB source surface.
@@ -563,13 +569,22 @@ namespace egl {
   );
 
   /**
+   * @brief Allocates storage for one plane of a render target.
+   *
+   * Called with the plane's texture bound to `GL_TEXTURE_2D`. Returns 0 on success or -1 on failure.
+   * The arguments are the plane index, its sized internal format, width and height.
+   */
+  using target_storage_fn = std::function<int(std::size_t plane, GLenum internal_format, int width, int height)>;
+
+  /**
    * @brief Creates biplanar YUV textures to render into.
    * @param width Width of the target frame.
    * @param height Height of the target frame.
    * @param format Format of the target frame.
+   * @param storage Optional allocator for the plane textures' storage. Uses `TexStorage2D` when empty.
    * @return The new RGB texture.
    */
-  std::optional<nv12_t> create_nv12_target(int width, int height, AVPixelFormat format);
+  std::optional<nv12_t> create_nv12_target(int width, int height, AVPixelFormat format, const target_storage_fn &storage = {});
 
   /**
    * @brief Create YUV444 target.
@@ -577,9 +592,10 @@ namespace egl {
    * @param width Frame or display width in pixels.
    * @param height Frame or display height in pixels.
    * @param format Pixel, audio, or protocol format being converted.
+   * @param storage Optional allocator for the plane textures' storage. Uses `TexStorage2D` when empty.
    * @return Created YUV444 target object or status.
    */
-  std::optional<yuv444_t> create_yuv444_target(int width, int height, AVPixelFormat format);
+  std::optional<yuv444_t> create_yuv444_target(int width, int height, AVPixelFormat format, const target_storage_fn &storage = {});
 
   /**
    * @brief Cursor image and hotspot metadata captured from the window system.
@@ -610,11 +626,11 @@ namespace egl {
      * @brief Reset the object to its initial empty state.
      */
     void reset() {
-      for (auto x = 0; x < 4; ++x) {
-        if (sd.fds[x] >= 0) {
-          close(sd.fds[x]);
+      for (auto fd_index = 0; fd_index < 4; ++fd_index) {
+        if (sd.fds[fd_index] >= 0) {
+          close(sd.fds[fd_index]);
 
-          sd.fds[x] = -1;
+          sd.fds[fd_index] = -1;
         }
       }
     }

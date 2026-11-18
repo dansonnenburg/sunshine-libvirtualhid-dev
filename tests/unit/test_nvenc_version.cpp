@@ -3,12 +3,12 @@
  * @brief Tests for runtime NVENC SDK version selection.
  */
 
+// test includes
+#include "../tests_common.h"
+
 // standard includes
 #include <array>
 #include <cstdint>
-
-// lib includes
-#include <gtest/gtest.h>
 
 // local includes
 #include "src/nvenc/nvenc_version.h"
@@ -40,8 +40,8 @@ namespace {
       nvenc_version_test_case {1201U, sdk_12_0},
       nvenc_version_test_case {1299U, sdk_12_0},
       nvenc_version_test_case {1300U, sdk_13_0},
-      nvenc_version_test_case {1301U, sdk_13_0},
-      nvenc_version_test_case {1400U, sdk_13_0},
+      nvenc_version_test_case {1301U, sdk_13_1},
+      nvenc_version_test_case {1400U, sdk_13_1},
     };
 
     for (const auto &[max_version, expected] : test_cases) {
