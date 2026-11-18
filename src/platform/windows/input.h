@@ -46,3 +46,21 @@ namespace platf::vigem {
    */
   void update_battery(DS4_REPORT_EX &ds4_report, const gamepad_battery_t &battery);
 }  // namespace platf::vigem
+
+namespace platf::libvirtualhid_dev {
+  /**
+   * @brief Scale a signed 16-bit stick axis to the driver's unsigned 8-bit range.
+   *
+   * @param value Signed axis value from a Moonlight gamepad state.
+   * @return Axis mapped onto `0`-`255`, with the signed zero point near `127`/`128`.
+   */
+  std::uint8_t scale_axis(std::int16_t value);
+
+  /**
+   * @brief Pack Moonlight gamepad button flags into the driver's 16-bit button field.
+   *
+   * @param button_flags Moonlight gamepad button mask.
+   * @return Button bits in the order expected by the libvirtualhid-dev report.
+   */
+  std::uint16_t encode_buttons(std::uint32_t button_flags);
+}  // namespace platf::libvirtualhid_dev

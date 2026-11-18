@@ -37,3 +37,17 @@ jobs:
           if (( ${#files[@]} )); then
             clang-format-18 --dry-run --Werror "${files[@]}"
           fi
+
+  # Compile and unit-test the native Windows build on every PR. The fork's only
+  # native change (the libvirtualhid-dev gamepad backend) is Windows-specific, so
+  # this reuses the proven ci-windows.yml definition rather than hand-rolling one.
+  # Signing is skipped because publish_release is false and no Azure inputs are passed.
+  build-windows:
+    name: Windows
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-windows.yml
+    with:
+      publish_release: 'false'
+      release_commit: ${{ github.sha }}
+      release_version: '0.0.0'

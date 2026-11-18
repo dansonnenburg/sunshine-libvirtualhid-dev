@@ -46,6 +46,28 @@
   <a href="https://sonarcloud.io/project/overview?id=SunshineStream_Sunshine"><img src="https://img.shields.io/sonar/quality_gate/SunshineStream_Sunshine.svg?server=https%3A%2F%2Fsonarcloud.io&style=for-the-badge&logo=sonarqubecloud&label=sonarcloud" alt="SonarCloud"></a>
 </div>
 
+> [!NOTE]
+> ## 🍴 This is a personal fork
+>
+> This repository (`dansonnenburg/sunshine-libvirtualhid-dev`, default branch
+> `libvirtualhid-dev-driver`) is a personal fork of
+> [LizardByte/Sunshine](https://github.com/LizardByte/Sunshine). It is **not** an
+> official LizardByte release and is not affiliated with or endorsed by the project.
+>
+> **What this fork adds**
+> - An experimental Windows gamepad backend, `libvirtualhid-dev`, selectable as a
+>   Gamepad Backend in the web UI (one generic HID gamepad; local testing only).
+> - A homepage decoupled from upstream's GitHub release feed (no update-nag network
+>   calls, no remote markdown rendered into the page).
+> - A lean CI policy (see [`docs/ci-budget.md`](docs/ci-budget.md)): every PR compiles
+>   and unit-tests the native Windows build; the full release matrix runs on `v*` tags.
+>
+> **Staying current with upstream**
+> - Run [`scripts/sync-upstream.ps1`](scripts/sync-upstream.ps1) to fetch and merge
+>   `upstream/master`, then verify the build before pushing.
+>
+> The original upstream README follows.
+
 ## ℹ️ About
 
 Sunshine is a self-hosted game stream host for Moonlight.

@@ -562,8 +562,12 @@ namespace platf {
         return -1;
       }
 
+      if (submit(neutral_report()) != 0) {
+        return -1;
+      }
+
       allocated_ = true;
-      return submit(neutral_report());
+      return 0;
     }
 
     int rebind_gamepad(const gamepad_id_t &id) const {
@@ -614,44 +618,14 @@ namespace platf {
       return {1, 0, 128, 128, 128, 128, 0, 0};
     }
 
-    static std::uint8_t axis(std::int16_t value) {
-      const auto shifted = static_cast<std::int32_t>(value) + 32768;
-      return static_cast<std::uint8_t>((shifted * 255) / 65535);
-    }
-
     static libvirtualhid_dev_report_t report_from(const gamepad_state_t &state) {
-      std::uint16_t buttons = 0;
-      const auto flags = state.buttonFlags;
-      auto set = [&buttons](std::uint32_t flag, std::uint16_t bit) {
-        if (flag) {
-          buttons |= bit;
-        }
-      };
-
-      set(flags & A, 1u << 0);
-      set(flags & B, 1u << 1);
-      set(flags & X, 1u << 2);
-      set(flags & Y, 1u << 3);
-      set(flags & LEFT_BUTTON, 1u << 4);
-      set(flags & RIGHT_BUTTON, 1u << 5);
-      set(flags & LEFT_STICK, 1u << 6);
-      set(flags & RIGHT_STICK, 1u << 7);
-      set(flags & BACK, 1u << 8);
-      set(flags & START, 1u << 9);
-      set(flags & HOME, 1u << 10);
-      set(flags & MISC_BUTTON, 1u << 11);
-      set(flags & DPAD_UP, 1u << 12);
-      set(flags & DPAD_DOWN, 1u << 13);
-      set(flags & DPAD_LEFT, 1u << 14);
-      set(flags & DPAD_RIGHT, 1u << 15);
-
       return {
         1,
-        buttons,
-        axis(state.lsX),
-        axis(state.lsY),
-        axis(state.rsX),
-        axis(state.rsY),
+        libvirtualhid_dev::encode_buttons(state.buttonFlags),
+        libvirtualhid_dev::scale_axis(state.lsX),
+        libvirtualhid_dev::scale_axis(state.lsY),
+        libvirtualhid_dev::scale_axis(state.rsX),
+        libvirtualhid_dev::scale_axis(state.rsY),
         state.lt,
         state.rt,
       };
@@ -735,6 +709,41 @@ namespace platf {
     unique_handle_t device_;
     bool allocated_ = false;
   };
+
+  namespace libvirtualhid_dev {
+    std::uint8_t scale_axis(std::int16_t value) {
+      const auto shifted = static_cast<std::int32_t>(value) + 32768;
+      return static_cast<std::uint8_t>((shifted * 255) / 65535);
+    }
+
+    std::uint16_t encode_buttons(std::uint32_t button_flags) {
+      std::uint16_t buttons = 0;
+      auto set = [&buttons, button_flags](std::uint32_t flag, std::uint16_t bit) {
+        if (button_flags & flag) {
+          buttons |= bit;
+        }
+      };
+
+      set(A, 1u << 0);
+      set(B, 1u << 1);
+      set(X, 1u << 2);
+      set(Y, 1u << 3);
+      set(LEFT_BUTTON, 1u << 4);
+      set(RIGHT_BUTTON, 1u << 5);
+      set(LEFT_STICK, 1u << 6);
+      set(RIGHT_STICK, 1u << 7);
+      set(BACK, 1u << 8);
+      set(START, 1u << 9);
+      set(HOME, 1u << 10);
+      set(MISC_BUTTON, 1u << 11);
+      set(DPAD_UP, 1u << 12);
+      set(DPAD_DOWN, 1u << 13);
+      set(DPAD_LEFT, 1u << 14);
+      set(DPAD_RIGHT, 1u << 15);
+
+      return buttons;
+    }
+  }  // namespace libvirtualhid_dev
 
   /**
    * @brief Check whether the libvirtualhid runtime should receive gamepad allocations.

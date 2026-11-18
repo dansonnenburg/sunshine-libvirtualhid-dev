@@ -706,15 +706,12 @@
         sortMode: "default",
         deleteTarget: null,
         version: null,
-        githubVersion: null,
       };
     },
     computed: {
       installedVersionNotStable() {
-        if (!this.githubVersion || !this.version) {
-          return false;
-        }
-        return this.version.isGreater(this.githubVersion);
+        // Fork build: the home view no longer polls upstream releases, so always target the latest docs.
+        return false;
       },
       documentationBaseUrl() {
         const docsVersion = this.installedVersionNotStable ? 'master' : 'latest'
@@ -784,11 +781,6 @@
           this.platform = r.platform;
           this.version = new SunshineVersion(null, r.version);
         });
-
-      fetch("https://api.github.com/repos/SunshineStream/Sunshine/releases/latest")
-        .then((r) => r.json())
-        .then((r) => this.githubVersion = new SunshineVersion(r, null))
-        .catch((e) => console.error(e));
     },
     methods: {
       newApp() {

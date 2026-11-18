@@ -1,37 +1,50 @@
-# Private-fork CI budget
+# Fork CI policy
 
-Routine pull requests run **PR Checks**: one Ubuntu 24.04 job, ten-minute timeout,
-read-only repository permissions, cached Node dependencies, web build, whitespace
-checks and clang-format 18 checks on changed C/C++ files. This is deliberately NOT
-a claim that native builds or native unit tests have passed. Superseded PR runs
-are cancelled. Workflows use `pull_request`, never privileged `pull_request_target`.
+This repository is a **public** fork of LizardByte/Sunshine. Public repositories get
+unlimited GitHub Actions minutes on standard runners, so CI is scoped for fast,
+relevant feedback rather than to ration billed minutes.
 
-The original multi-platform **CI** remains available through Actions → CI → Run
-workflow and version tags (`v*`). It is no longer launched by every dependency PR.
-Native Windows checkout enables Git long-path support before recursive submodules.
+## Pull requests
 
-Homebrew formula validation, Copr publishing and Pages deployment are upstream-only:
-they depend on public source access, upstream credentials or upstream infrastructure.
-Private-fork CodeQL is opt-in via `ENABLE_CODEQL=true`, only after code-scanning
-entitlement/setup is available. Artifact/screenshot comment jobs require upstream
-ownership AND successful source CI, so failed builds cannot fan out into publishers.
-The fork's release artifact upload paths inside native build jobs remain available.
+Every pull request runs **PR Checks**:
 
-Submodule version updates are grouped into one weekly Monday PR. GitHub vulnerability
-alerts and the independent Hermes security monitor remain enabled daily. Security
-alerts are not silenced to save minutes. Hermes retains existing security PRs instead
-of creating a new dated PR daily; failed checks remain blockers, never successes.
+- `web-and-format`: one Ubuntu 24.04 job, ten-minute timeout, read-only repository
+  permissions, cached Node dependencies, web production build, whitespace checks and
+  clang-format 18 checks on changed C/C++ files.
+- `build-windows`: the full native Windows build and unit tests, reusing the upstream
+  `ci-windows.yml` definition (AMD64 and ARM64). This compiles and tests the fork's
+  only native change, the Windows libvirtualhid-dev gamepad backend, before merge.
+  Code signing is skipped (`publish_release` is false and no Azure inputs are passed).
 
-## Verification and remaining limitations
+Superseded PR runs are cancelled. Workflows use `pull_request`, never the privileged
+`pull_request_target`.
 
-Validated locally: workflow actionlint, workflow policy regressions, Node install and
-web production build. Hosted execution is currently blocked by account usage/billing;
-Windows and the complete native packaging matrix are not execution-verified by this
-change. Historical Flatpak/Arch packaging failures still require a targeted manual
-run and diagnosis; do not label the full native matrix green based on the web check.
+## Releases and the full matrix
+
+The multi-platform **CI** workflow runs on version tags (`v*`) and via
+Actions -> CI -> Run workflow. It is intentionally not launched by routine dependency
+PRs; the native Windows leg above already covers the fork's compiled surface on PRs.
+
+Homebrew formula validation, Copr publishing and Pages deployment stay upstream-only:
+they depend on upstream credentials or upstream infrastructure and are guarded by
+`github.repository_owner == 'LizardByte'`. Artifact/screenshot comment jobs require
+upstream ownership AND successful source CI, so a failed build cannot fan out into a
+publisher.
+
+## Code scanning
+
+CodeQL is enabled on this fork via the `ENABLE_CODEQL` repository variable
+(`vars.ENABLE_CODEQL == 'true'` in `_codeql.yml`). Public repositories get CodeQL at
+no cost. To disable it again, delete the variable (`gh variable delete ENABLE_CODEQL`).
+
+## Dependencies and security
+
+Renovate is disabled on this fork (`renovate.json` sets `"enabled": false`) so it does
+not recreate upstream's high-volume update PRs. Submodule version updates are grouped
+into one weekly Monday Dependabot PR. GitHub vulnerability alerts remain enabled and
+are not silenced to save minutes.
 
 ## Rollback
 
-Revert the CI-budget commit on the default branch; no force-push is necessary.
-The change is limited to `.github/` plus this document. Closed duplicate security PRs
-retain their branches and can be reopened; unique vulnerability PRs are preserved.
+Revert the relevant commit on the default branch; no force-push is necessary. The CI
+policy lives entirely in `.github/` plus this document.
