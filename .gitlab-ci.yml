@@ -1,0 +1,51 @@
+# GitLab CI: build the Sunshine fork MSI on the Windows shell runner.
+#
+# This is a thin wrapper around scripts/package.ps1 (the same script used to build
+# locally), following the app-packaging GitLab build-leg convention:
+#   git tag vX.Y.Z  ->  this pipeline (windows runner)  ->  MSI published to the NAS
+#
+# Prerequisites (one-time, Dan runs these):
+#   - The Windows shell-executor runner (tag `windows`) is registered and ONLINE on
+#     dandesktop, and assigned to this project (gitlab skill, references/windows-runner.md).
+#   - That runner host has the MSYS2 UCRT64 toolchain + deps that ci-windows.yml lists
+#     (boost, cmake, ninja, gcc, qt6-static, openssl, ...), plus dotnet (for the WiX tool)
+#     and Node.js on PATH.
+#   - This repo is onboarded to GitLab and `git push gitlab` has populated it (the first
+#     push is a manual step; the harness blocks the agent from doing it).
+#
+# Deploy stays a separate, human-gated Semaphore run (app-packaging deploy leg); this
+# pipeline only builds and publishes.
+
+stages:
+  - package
+
+package:installer:
+  stage: package
+  tags:
+    - windows
+  rules:
+    # Release build: a vX.Y.Z tag is the release.
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/'
+      variables:
+        PKG_VERSION: "$CI_COMMIT_TAG"
+    # Manual web-triggered build: set PKG_VERSION in the run form.
+    - if: '$PKG_VERSION'
+      when: manual
+  variables:
+    # Strip a leading 'v' from a tag so 'v2026.1.0' becomes '2026.1.0'.
+    GIT_SUBMODULE_STRATEGY: recursive
+  script:
+    - $ErrorActionPreference = 'Stop'
+    - $version = "$env:PKG_VERSION" -replace '^v', ''
+    - if (-not $version) { throw 'PKG_VERSION is empty.' }
+    - Write-Host "Building Sunshine $version"
+    - pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1 -Version $version -Commit $env:CI_COMMIT_SHORT_SHA -PublishToNas
+  artifacts:
+    name: "sunshine-$CI_COMMIT_SHORT_SHA-buildlog"
+    when: always
+    expire_in: 2 weeks
+    paths:
+      # Keep only the small build log for traceability; the MSI lives on the NAS, never
+      # published as a GitLab artifact (it can bundle proprietary data).
+      - dist/*.log
+  timeout: 2h
