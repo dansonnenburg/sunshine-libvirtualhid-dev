@@ -702,6 +702,7 @@
     "virtual_gamepad_licensed_desc": "Virtual HID Broker is installed, licensed, and ready for full virtual input support.",
     "virtual_gamepad_macos_desc": "Virtual HID Broker creates Xbox, PlayStation, Nintendo Switch Pro, and Generic gamepads on macOS. Install the separate broker and activate its machine license to use controller input.",
     "virtual_gamepad_none_desc": "Virtual gamepad emulation is disabled in Input configuration.",
+    "virtual_gamepad_dev_desc": "The experimental libvirtualhid-dev backend uses a separately installed driver and supports one generic HID gamepad.",
     "virtual_gamepad_unset_desc": "Choose which Windows virtual gamepad drivers Sunshine may use. Virtual HID Broker is an optional paid upgrade. ViGEmBus has limited features and has reached end of life.",
     "virtual_gamepad_vigembus_desc": "Sunshine is using ViGEmBus for limited Xbox 360 and DualShock 4 emulation and SendInput for keyboard and mouse. ViGEmBus has reached end of life. Consider upgrading to Virtual HID Broker for broader, actively supported virtual input.",
     "virtualhid_benefit_features": "Supports controller-specific features such as motion, touchpads, LEDs, and adaptive triggers when available.",

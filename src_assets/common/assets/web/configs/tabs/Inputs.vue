@@ -76,6 +76,13 @@ const vigembusGamepads = new Set(['auto', 'x360', 'ds4'])
 const vigembusOnly = computed(() => props.platform === 'windows' && config.value.gamepad_driver === 'vigembus')
 const libvirtualhidDevGamepads = new Set(['auto', 'generic'])
 const libvirtualhidDevOnly = computed(() => props.platform === 'windows' && config.value.gamepad_driver === 'libvirtualhid-dev')
+/** Choose help text for the selected backend. */
+const gamepadDriverDescription = computed(() => {
+  if (libvirtualhidDevOnly.value) {
+    return 'troubleshooting.virtual_gamepad_dev_desc'
+  }
+  return props.platform === 'macos' ? 'config.gamepad_driver_macos_desc' : 'config.gamepad_driver_desc'
+})
 const gamepadDriverSelection = computed({
   get: () => props.platform === 'macos' && !config.value.gamepad_driver ? 'virtualhid' : config.value.gamepad_driver,
   set: value => { config.value.gamepad_driver = value },
@@ -139,7 +146,7 @@ watch(
         <option v-if="platform === 'windows'" value="libvirtualhid-dev">{{ $t('config.gamepad_driver_libvirtualhid_dev') }}</option>
         <option value="none">{{ $t('config.gamepad_driver_none') }}</option>
       </select>
-      <div class="form-text">{{ $t(platform === 'macos' ? 'config.gamepad_driver_macos_desc' : 'config.gamepad_driver_desc') }}</div>
+      <div class="form-text">{{ $t(gamepadDriverDescription) }}</div>
     </div>
 
     <!-- Emulated Gamepad Type -->

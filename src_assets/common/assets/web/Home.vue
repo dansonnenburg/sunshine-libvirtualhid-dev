@@ -128,7 +128,7 @@
         console.log("Version: ", this.version.version)
 
         // Read the broker version on both platforms to identify development builds.
-        if (this.platform === 'windows' || this.platform === 'macos') {
+        if (!this.customGamepadDriverSelected && (this.platform === 'windows' || this.platform === 'macos')) {
           try {
             const virtualInputStatus = await fetch("./api/virtual-input/status").then((r) => r.json());
             this.virtualhid = virtualInputStatus.virtualhid;
@@ -139,7 +139,7 @@
             console.error("Failed to fetch virtual input driver status:", e);
           }
         }
-        if (this.platform === 'windows' || this.platform === 'macos') {
+        if (!this.customGamepadDriverSelected && (this.platform === 'windows' || this.platform === 'macos')) {
           try {
             this.virtualhidLicense = await fetch("./api/virtual-input/license").then((r) => r.json());
           } catch (e) {
@@ -157,6 +157,10 @@
       this.loading = false;
     },
     computed: {
+      /** Whether Sunshine is configured to use the independent Windows gamepad driver. */
+      customGamepadDriverSelected() {
+        return this.platform === 'windows' && this.gamepadDriver === 'libvirtualhid-dev';
+      },
       /** Return required permissions that the current platform can check and has not granted. */
       missingPermissions() {
         return this.permissions.filter(permission => permission.required && permission.verifiable && permission.status !== 'granted');
@@ -166,7 +170,7 @@
        * Warn about broker or gamepad driver issues when virtual gamepads are enabled.
        */
       virtualInputNotice() {
-        if (!this.controllerEnabled || this.gamepadDriver === 'none') {
+        if (!this.controllerEnabled || this.gamepadDriver === 'none' || this.customGamepadDriverSelected) {
           return null;
         }
 

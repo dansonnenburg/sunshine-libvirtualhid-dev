@@ -131,7 +131,7 @@
           </article>
         </div>
 
-        <section class="virtual-gamepad-section" v-if="platform === 'windows' || platform === 'macos'">
+        <section class="virtual-gamepad-section" v-if="!customGamepadDriverSelected && (platform === 'windows' || platform === 'macos')">
           <div class="virtual-gamepad-section-heading">
             <div>
               <h3 class="h4 mb-1">{{ $t('troubleshooting.virtual_gamepad_drivers') }}</h3>
@@ -649,8 +649,13 @@
           });
         },
 
+        /** Whether Sunshine is configured to use the independent Windows gamepad driver. */
+        customGamepadDriverSelected() {
+          return this.platform === 'windows' && this.gamepadDriver === 'libvirtualhid-dev';
+        },
+
         showVirtualhid() {
-          return this.gamepadDriver !== 'none' && (this.platform === 'macos' || this.gamepadDriver !== 'vigembus');
+          return !this.customGamepadDriverSelected && this.gamepadDriver !== 'none' && (this.platform === 'macos' || this.gamepadDriver !== 'vigembus');
         },
 
         showVigembus() {
@@ -658,7 +663,7 @@
         },
 
         showVirtualhidBenefits() {
-          return this.platform === 'windows' && this.gamepadDriver !== 'none' && !(this.virtualhid.installed && this.virtualhidLicense.licensed);
+          return this.platform === 'windows' && !this.customGamepadDriverSelected && this.gamepadDriver !== 'none' && !(this.virtualhid.installed && this.virtualhidLicense.licensed);
         },
 
         virtualInputDescriptionKey() {
@@ -673,6 +678,9 @@
           }
           if (this.gamepadDriver === 'vigembus') {
             return 'troubleshooting.virtual_gamepad_vigembus_desc';
+          }
+          if (this.customGamepadDriverSelected) {
+            return 'troubleshooting.virtual_gamepad_dev_desc';
           }
           if (this.virtualhid.installed && this.virtualhidLicense.licensed) {
             return this.gamepadDriver === 'all' ?
@@ -812,7 +820,7 @@
             this.gamepadDriver = r.gamepad_driver || '';
             this.refreshPermissions();
             // The Windows broker also backs relative mouse input when gamepads are disabled.
-            if (this.platform === 'windows' || this.platform === 'macos') {
+            if (!this.customGamepadDriverSelected && (this.platform === 'windows' || this.platform === 'macos')) {
               this.refreshDriverInformation();
             }
             if ((this.platform === 'windows' || this.platform === 'macos') && this.showVirtualhid) {

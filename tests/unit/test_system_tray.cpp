@@ -495,6 +495,34 @@ TEST_F(SystemTrayTest, VigembusSelectionSuppressesVirtualHidNotifications) {
   EXPECT_EQ(tray_data.notification_cb, nullptr);
 }
 
+TEST_F(SystemTrayTest, CustomGamepadSelectionHidesVirtualHidBrokerPromptsAndMenu) {
+  lvh::LicenseStatus license;
+  license.state = lvh::LicenseState::unlicensed;
+  system_tray::update_tray_virtualhid_license(license, true);
+
+  const auto &tray_data = system_tray::tray_data_for_testing();
+  ASSERT_STREQ(tray_data.menu[2].text, "Virtual HID Broker");
+  ASSERT_NE(tray_data.notification_title, nullptr);
+
+  config::input.gamepad_driver = config::GAMEPAD_DRIVER_LIBVIRTUALHID_DEV;
+  system_tray::prepare_tray_virtualhid_license();
+  system_tray::update_tray_virtualhid_driver(true, "0.0.1", false, "1.0.0");
+
+  EXPECT_EQ(tray_data.notification_title, nullptr);
+  EXPECT_EQ(tray_data.notification_text, nullptr);
+  EXPECT_EQ(tray_data.notification_cb, nullptr);
+  EXPECT_STREQ(tray_data.menu[0].text, "Open Sunshine");
+  EXPECT_STREQ(tray_data.menu[2].text, "Donate");
+  for (auto item = tray_data.menu; item->text; ++item) {
+    EXPECT_STRNE(item->text, "Virtual HID Broker");
+  }
+
+  config::input.gamepad_driver = config::GAMEPAD_DRIVER_VIRTUALHID;
+  system_tray::update_tray_virtualhid_license(license, true);
+  EXPECT_STREQ(tray_data.menu[2].text, "Virtual HID Broker");
+  EXPECT_STREQ(tray_data.notification_title, "Virtual HID Broker License");
+}
+
 TEST_F(SystemTrayTest, NoneSelectionSuppressesWindowsVirtualHidNotifications) {
   lvh::LicenseStatus license;
   license.service_available = false;

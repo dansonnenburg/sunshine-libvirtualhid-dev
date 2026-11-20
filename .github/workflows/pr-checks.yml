@@ -3,6 +3,11 @@ name: PR Checks
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: Windows installer version
+        type: string
+        default: '0.0.0'
 
 permissions:
   contents: read
@@ -50,4 +55,4 @@ jobs:
     with:
       publish_release: 'false'
       release_commit: ${{ github.sha }}
-      release_version: '0.0.0'
+      release_version: ${{ inputs.release_version || '0.0.0' }}

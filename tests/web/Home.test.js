@@ -56,6 +56,15 @@ afterEach(() => {
 })
 
 describe('development broker home notice', () => {
+  it('skips Broker checks and notices for the independent Windows gamepad driver', async () => {
+    const wrapper = await mountHome('windows', { gamepadDriver: 'libvirtualhid-dev', licensed: false })
+
+    expect(fetch).not.toHaveBeenCalledWith('./api/virtual-input/status')
+    expect(fetch).not.toHaveBeenCalledWith('./api/virtual-input/license')
+    expect(wrapper.find('.alert.my-4').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('links to permission controls when macOS is missing required access', async () => {
     const wrapper = await mountHome('macos', { permissions: [
       { id: 'screen_recording', status: 'denied', required: true, verifiable: true },

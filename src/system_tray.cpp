@@ -45,6 +45,7 @@
   #endif
 
   // standard includes
+  #include <algorithm>
   #include <array>
   #include <atomic>
   #include <chrono>
@@ -53,6 +54,7 @@
   #include <filesystem>
   #include <format>
   #include <functional>
+  #include <iterator>
   #include <mutex>
   #include <optional>
   #include <string>
@@ -288,39 +290,51 @@ namespace system_tray {
   }
   #endif
 
-  // Tray menu
+  /** @brief Default tray menu, including the optional Broker controls. */
+  static struct tray_menu tray_menu_items[] = {
+    // Tray menu labels currently use the project's English source strings.
+    {.text = "Open Sunshine", .cb = tray_open_ui_cb},
+    {.text = "-"},
+  #if defined(_WIN32) || defined(__APPLE__)
+    {.text = "Virtual HID Broker", .submenu = virtualhid_license_menu.data()},
+    {.text = "-"},
+  #endif
+    {.text = "Donate",
+     .submenu =
+       (struct tray_menu[]) {
+         {.text = "GitHub Sponsors", .cb = tray_donate_github_cb},
+         {.text = "Patreon", .cb = tray_donate_patreon_cb},
+         {.text = "PayPal", .cb = tray_donate_paypal_cb},
+         {.text = nullptr}
+       }},
+    {.text = "-"},
+  // Currently display device settings are only supported on Windows
+  #ifdef _WIN32
+    {.text = "Reset Display Device Config", .cb = tray_reset_display_device_config_cb},
+  #endif
+    {.text = "Restart", .cb = tray_restart_cb},
+    {.text = "Quit", .cb = tray_quit_cb},
+    {.text = nullptr}
+  };
+
+  #ifdef _WIN32
+  /** @brief Tray menu for the independent gamepad driver, without the Broker entry and its separator. */
+  static auto libvirtualhid_dev_menu = [] {
+    constexpr std::size_t broker_menu_index = 2;
+    std::array<struct tray_menu, std::size(tray_menu_items) - 2> menu {};
+    const auto remaining = std::copy_n(tray_menu_items, broker_menu_index, menu.begin());
+    std::copy(tray_menu_items + broker_menu_index + 2, std::end(tray_menu_items), remaining);
+    return menu;
+  }();
+  #endif
+
   static struct tray tray = {
     .icon = TRAY_ICON,
     .tooltip = PROJECT_NAME,
   #ifdef __APPLE__
     .cb = tray_native_menu_click_cb,
   #endif
-    .menu =
-      (struct tray_menu[]) {
-        // Tray menu labels currently use the project's English source strings.
-        {.text = "Open Sunshine", .cb = tray_open_ui_cb},
-        {.text = "-"},
-  #if defined(_WIN32) || defined(__APPLE__)
-        {.text = "Virtual HID Broker", .submenu = virtualhid_license_menu.data()},
-        {.text = "-"},
-  #endif
-        {.text = "Donate",
-         .submenu =
-           (struct tray_menu[]) {
-             {.text = "GitHub Sponsors", .cb = tray_donate_github_cb},
-             {.text = "Patreon", .cb = tray_donate_patreon_cb},
-             {.text = "PayPal", .cb = tray_donate_paypal_cb},
-             {.text = nullptr}
-           }},
-        {.text = "-"},
-  // Currently display device settings are only supported on Windows
-  #ifdef _WIN32
-        {.text = "Reset Display Device Config", .cb = tray_reset_display_device_config_cb},
-  #endif
-        {.text = "Restart", .cb = tray_restart_cb},
-        {.text = "Quit", .cb = tray_quit_cb},
-        {.text = nullptr}
-      },
+    .menu = tray_menu_items,
   #if defined(_WIN32) || defined(__APPLE__)
     .iconPathCount = 5,
     .allIconPaths = {TRAY_ICON, TRAY_ICON_LOCKED, TRAY_ICON_PLAYING, TRAY_ICON_PAUSING, TRAY_ICON_VIRTUALHID},
@@ -347,6 +361,7 @@ namespace system_tray {
     tray.notification_text = nullptr;
     tray.notification_title = nullptr;
     tray.notification_cb = nullptr;
+    tray.menu = tray_menu_items;
     #if defined(_WIN32) || defined(__APPLE__)
     virtualhid_license_menu_text_storage() = {};
     virtualhid_driver_notification_text_storage().clear();
@@ -498,6 +513,16 @@ namespace system_tray {
   void update_tray_virtualhid_license(const lvh::LicenseStatus &license, const bool notify_if_unlicensed) {
     const std::scoped_lock lock(tray_state_mutex());
     clear_tray_notification();
+    #ifdef _WIN32
+    if (config::input.gamepad_driver == config::GAMEPAD_DRIVER_LIBVIRTUALHID_DEV) {
+      tray.menu = libvirtualhid_dev_menu.data();
+      if (tray_initialized_state().load()) {
+        tray_update(&tray);
+      }
+      return;
+    }
+    tray.menu = tray_menu_items;
+    #endif
     rebuild_virtualhid_license_menu(license);
 
     #ifdef _WIN32
@@ -543,6 +568,12 @@ namespace system_tray {
   }
 
   void prepare_tray_virtualhid_license() {
+    #ifdef _WIN32
+    if (config::input.gamepad_driver == config::GAMEPAD_DRIVER_LIBVIRTUALHID_DEV) {
+      update_tray_virtualhid_license({}, false);
+      return;
+    }
+    #endif
     const auto result = lvh::get_license_status();
     update_tray_virtualhid_license(result.license, !result.license.licensed());
   }
@@ -557,7 +588,7 @@ namespace system_tray {
       return;
     }
     #ifdef _WIN32
-    if (config::input.gamepad_driver.empty() || config::input.gamepad_driver == config::GAMEPAD_DRIVER_VIGEMBUS) {
+    if (config::input.gamepad_driver.empty() || config::input.gamepad_driver == config::GAMEPAD_DRIVER_VIGEMBUS || config::input.gamepad_driver == config::GAMEPAD_DRIVER_LIBVIRTUALHID_DEV) {
       return;
     }
     #endif
