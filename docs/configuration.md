@@ -370,7 +370,7 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
     </tr>
     <tr>
         <td>libvirtualhid-dev</td>
-        <td>Use Dan's experimental static HID gamepad driver. This supports one generic gamepad and is intended for local testing only.</td>
+        <td>Use a separately installed experimental static HID driver for one generic gamepad on Windows. Sunshine hides Virtual HID Broker notices for this backend.</td>
     </tr>
 </table>
 

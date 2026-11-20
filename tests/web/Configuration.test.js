@@ -237,4 +237,14 @@ describe('gamepad input configuration', () => {
     ])
     expect(wrapper.get('#gamepad').element.value).toBe('auto')
   })
+
+  it('shows independent driver guidance after selecting libvirtualhid-dev', async () => {
+    const wrapper = mountInputs('windows', 'virtualhid', 'xone')
+
+    await wrapper.get('#gamepad_driver').setValue('libvirtualhid-dev')
+    expect(wrapper.text()).toContain('troubleshooting.virtual_gamepad_dev_desc')
+    expect(wrapper.text()).not.toContain('config.gamepad_driver_desc')
+    expect(wrapper.get('#gamepad').findAll('option').map(option => option.attributes('value'))).toEqual(['auto', 'generic'])
+    expect(wrapper.get('#gamepad').element.value).toBe('auto')
+  })
 })

@@ -75,6 +75,18 @@ afterEach(() => {
 })
 
 describe('virtual input troubleshooting', () => {
+  it('shows custom driver guidance without Broker licensing or promotions', async () => {
+    const wrapper = await mountTroubleshooting('windows', 'libvirtualhid-dev', { licensed: false })
+
+    expect(wrapper.get('.virtual-gamepad-hero').text()).toContain('troubleshooting.virtual_gamepad_dev_desc')
+    expect(wrapper.find('.virtual-gamepad-feature-grid').exists()).toBe(false)
+    expect(wrapper.find('.virtual-gamepad-section').exists()).toBe(false)
+    expect(wrapper.find('.virtualhid-license-section').exists()).toBe(false)
+    expect(fetch).not.toHaveBeenCalledWith('/api/virtual-input/status')
+    expect(fetch).not.toHaveBeenCalledWith('/api/virtual-input/license')
+    wrapper.unmount()
+  })
+
   it.each([
     ['valid', false],
     ['malformed', true],
